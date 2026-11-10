@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FreeTV">
+<meta name="theme-color" content="#0A0E14">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="icon" href="icon-192.png">
+<title>FreeTV</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="intro"><img src="logo.png" alt="freetv"></div>
+<div id="app">
+  <aside id="rail"></aside>
+  <main id="view"></main>
+  <nav id="tabs"></nav>
+</div>
+<div id="player" class="hidden"></div>
+<div id="sheet" class="hidden"></div>
+<div id="toast"></div>
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
