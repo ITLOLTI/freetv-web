@@ -1,7 +1,7 @@
 {
   "name": "freetv-mac",
   "productName": "FreeTV",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "FreeTV for Mac \u2013 IPTV player with recording and downloads",
   "main": "main.cjs",
   "author": "ITLOLTI",
@@ -11,7 +11,9 @@
     "dist": "electron-builder --mac dmg --publish never"
   },
   "dependencies": {
-    "ffmpeg-static": "^5.2.0"
+    "ffmpeg-static": "^5.2.0",
+    "hls.js": "1.5.17",
+    "mpegts.js": "1.7.3"
   },
   "devDependencies": {
     "electron": "^33.2.0",

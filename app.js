@@ -9,7 +9,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const pad = (n) => String(n).padStart(2, "0");
-const clock = (ms) => { const d = new Date(ms); return pad(d.getHours()) + ":" + pad(d.getMinutes()); };
+const clock = (ms) => clockFmt(ms);
 const fmtTime = (s) => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return (h ? h + ":" + pad(m) : m) + ":" + pad(s % 60); };
 const initials = (n) => String(n || "?").replace(/[^\p{L}\p{N} ]/gu, "").split(" ").filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "TV";
 
@@ -82,6 +82,7 @@ function imgUrl(u) {
   return u;
 }
 async function fetchText(url, { headers, timeout = 45000, forceRelay = false } = {}) {
+  const ua = cfg("customUa"); if (ua) headers = { "User-Agent": ua, ...(headers || {}) };
   const r = relay();
   const viaRelay = !!r.url;
   const target = viaRelay ? px(url, headers) : url;
@@ -171,7 +172,7 @@ const Xtream = {
     progress("Loading channels…");
     const [lc, ls] = await Promise.all([fetchJSON(this.api(p, "get_live_categories")), fetchJSON(this.api(p, "get_live_streams"), { timeout: 120000 })]);
     const catName = new Map((lc || []).map((c) => [String(c.category_id), c.category_name]));
-    const fmt = store.get("liveFmt", "m3u8");
+    const fmt = cfg("liveFmt") ? "ts" : "m3u8";
     const live = (ls || []).map((s, i) => ({ id: "x" + s.stream_id, sid: s.stream_id, name: s.name, logo: s.stream_icon, group: catName.get(String(s.category_id)) || "Other",
       num: +s.num || i + 1, epgId: s.epg_channel_id, url: this.base(p) + "/live/" + p.user + "/" + p.pass + "/" + s.stream_id + "." + fmt, archive: +s.tv_archive || 0 }));
     return { live, movies: null, series: null };
@@ -330,7 +331,8 @@ function indexLive() {
 async function loadActive(force = false) {
   const p = active();
   S.live = []; S.movies = []; S.series = []; S.vodLoaded = false; S.vodCats = null; S.epg = {}; S.epgShort.clear(); S.account = null; S.stalker = null; S.error = "";
-  S.groupChosen = !!store.get("group." + S.activeId, null); S.liveGroup = store.get("group." + S.activeId, null);
+  const rg = cfg("rememberGroup") ? store.get("group." + S.activeId, null) : null;
+  S.groupChosen = !!rg; S.liveGroup = rg;
   if (!p) { render(); return; }
   const cacheKey = "content." + p.id;
   S.loading = true; S.progress = tr("Loading…"); render();
@@ -342,7 +344,7 @@ async function loadActive(force = false) {
     S.epg = (await idb.get("epg." + p.id)) || {};
   }
   const age = cached ? Date.now() - (cached.at || 0) : Infinity;
-  if (!force && age < 8 * 3600e3) { afterLoad(p); return; }
+  if (!force && age < OPT.refreshMs[cfg("refresh")]) { afterLoad(p); return; }
   S.loading = !cached; S.progress = tr("Loading…"); render();
   try {
     const prog = (m) => { S.progress = tr(m); if (S.loading) render(); };
@@ -515,13 +517,16 @@ function renderLive(v) {
   $$("[data-g]", v).forEach((b) => b.onclick = () => { S.liveGroup = b.dataset.g; S.groupChosen = true; store.set("group." + S.activeId, S.liveGroup); renderLive(v); });
   const on = $("#gchips .on"); if (on) on.scrollIntoView({ inline: "center", block: "nearest" });
   $("#lq").oninput = (e) => { liveFilter = e.target.value; const pos = e.target.selectionStart; renderLive(v); const q = $("#lq"); q.focus(); q.setSelectionRange(pos, pos); };
+  const style = cfg("chStyle"), showEpg = cfg("showEpg") && style !== 1;
+  $("#chl").className = style === 2 ? "chgrid" : "chlist" + (style === 1 ? " compact" : "");
   incremental($("#chl"), $("#more"), list, (c) => {
-    const { now } = nowNext(c); const fv = f.has("c:" + c.id);
+    const { now } = showEpg ? nowNext(c) : {}; const fv = f.has("c:" + c.id);
+    if (style === 2) return '<div class="ch tilech" data-id="' + esc(c.id) + '"><div class="lg">' + logoHtml(c.logo, c.name) + '</div><div class="nm"><span class="num">' + c.num + "</span> " + esc(c.name) + '</div><button class="star ' + (fv ? "on" : "") + '" data-star>' + (fv ? "★" : "☆") + "</button></div>";
     return '<div class="ch" data-id="' + esc(c.id) + '"><span class="num">' + c.num + '</span><div class="lg">' + logoHtml(c.logo, c.name) + '</div><div class="tx"><div class="nm">' + esc(c.name) + '</div><div class="np">' +
       (now ? esc(clock(now.s) + " " + now.t) + '<div class="prog"><i style="width:' + Math.round((Date.now() - now.s) / (now.e - now.s) * 100) + '%"></i></div>' : "") + '</div></div><button class="star ' + (fv ? "on" : "") + '" data-star>' + (fv ? "★" : "☆") + "</button></div>";
   }, (row, c) => {
     row.onclick = (e) => { if (e.target.closest("[data-star]")) { const on = toggleFav("c:" + c.id); e.target.textContent = on ? "★" : "☆"; e.target.classList.toggle("on", on); return; } playChannel(c, list); };
-    wantShortEpg(c);
+    if (showEpg) wantShortEpg(c);
   });
 }
 /** Renders long lists in chunks as you scroll (50 000 movies stay smooth on a phone). */
@@ -677,41 +682,6 @@ function renderSearch(v) {
 }
 
 // ---------------- Settings & playlists
-function renderSettings(v) {
-  const r = relay();
-  const a = S.account;
-  v.innerHTML = "<h1>" + tr("Settings") + "</h1><h2>" + tr("Playlists") + '</h2><div class="list">' +
-    S.playlists.map((p) => '<div class="item"><div><div style="font-weight:600">' + esc(p.name) + '</div><div class="small dim">' + ({ m3u: "M3U", xtream: "Xtream Codes", mac: "MAC portal" }[p.type]) + "</div></div><span class=sp></span>" +
-      (p.id === S.activeId ? '<span class="small" style="color:var(--acc)">' + tr("Active") + "</span>" : '<button class="btn" data-use="' + p.id + '">' + tr("Use") + "</button>") + '<button class="btn" data-edit="' + p.id + '">' + tr("Edit") + "</button></div>").join("") +
-    '<button class="item" id="addPl" style="color:var(--acc)">＋ ' + tr("Add playlist") + "</button></div>" +
-    (a && a.exp_date ? '<div class="small dim" style="margin:8px 4px">' + tr("Subscription") + " " + tr("expires") + ": " + new Date(a.exp_date * 1000).toLocaleDateString() + " · " + Math.ceil((a.exp_date * 1000 - Date.now()) / 864e5) + " " + tr("days left") + "</div>" : "") +
-    (DESK ? "<h2>" + tr("Recordings & downloads") + '</h2><div class="glass" style="padding:14px 16px"><div class="small dim">' + tr("Folder") + '</div><div style="margin:4px 0 12px;word-break:break-all">' + esc(DCFG ? DCFG.folder : "") +
-      '</div><div class="row"><button class="btn primary" id="chf">' + tr("Choose folder…") + '</button><button class="btn" id="opf">' + tr("Open folder") + "</button></div></div>" : "") +
-    (DESK ? "" : "<h2>" + tr("Relay") + '</h2><div class="glass" style="padding:14px 16px"><div class="small dim">Needed for most IPTV servers (http:// links, MAC portals). See the setup guide in the README.</div>' +
-    '<label class="f">' + tr("Relay URL") + '</label><input class="in" id="rurl" placeholder="https://freetv-relay.yourname.workers.dev" value="' + esc(r.url) + '" autocapitalize="off">' +
-    '<label class="f">' + tr("Relay key") + '</label><input class="in" id="rkey" value="' + esc(r.key) + '" autocapitalize="off"><div class="row" style="margin-top:12px"><button class="btn primary" id="rsave">' + tr("Save") + '</button><span class="small dim" id="rstat"></span></div></div>') +
-    "<h2>" + tr("Language") + '</h2><div class="seg" id="lang"><button data-l="en" class="' + (LANG === "en" ? "on" : "") + '">English</button><button data-l="sq" class="' + (LANG === "sq" ? "on" : "") + '">Shqip</button></div>' +
-    "<h2>" + tr("Live stream format") + '</h2><div class="seg" id="fmt"><button data-f="m3u8" class="' + (store.get("liveFmt", "m3u8") === "m3u8" ? "on" : "") + '">HLS (.m3u8)</button><button data-f="ts" class="' + (store.get("liveFmt", "m3u8") === "ts" ? "on" : "") + '">MPEG-TS (.ts)</button></div>' +
-    '<div class="small dim" style="margin:6px 4px">iPhone needs HLS. Xtream only.</div>' +
-    '<div class="list" style="margin-top:22px"><button class="item" id="reload">' + tr("Reload playlist") + '</button><button class="item" id="clear" style="color:var(--bad)">' + tr("Clear saved data") + "</button></div>" +
-    '<div class="small dim" style="text-align:center;margin:24px">FreeTV ' + (DESK ? "for Mac" : "web") + " 1.0</div>";
-  $("#addPl").onclick = () => editPlaylist();
-  $$("[data-use]", v).forEach((b) => b.onclick = () => { S.activeId = b.dataset.use; store.set("active", S.activeId); loadActive(); go("home"); });
-  $$("[data-edit]", v).forEach((b) => b.onclick = () => editPlaylist(S.playlists.find((p) => p.id === b.dataset.edit)));
-  if (DESK) {
-    $("#chf").onclick = async () => { const f = await DESK.chooseFolder(); if (DCFG) DCFG.folder = f; renderSettings(v); };
-    $("#opf").onclick = () => DESK.open();
-  }
-  if ($("#rsave")) $("#rsave").onclick = async () => {
-    store.set("relayUrl", $("#rurl").value.trim()); store.set("relayKey", $("#rkey").value.trim());
-    const st = $("#rstat"); st.textContent = "Testing…";
-    try { const res = await fetch(relay().url + "/"); st.textContent = res.ok ? "✓ Relay works" : "Relay answered " + res.status; } catch (e) { st.textContent = "✗ Can't reach the relay"; }
-  };
-  $$("#lang button").forEach((b) => b.onclick = () => { LANG = b.dataset.l; store.set("lang", LANG); render(); });
-  $$("#fmt button").forEach((b) => b.onclick = () => { store.set("liveFmt", b.dataset.f); toast("Saved – reload the playlist to apply"); renderSettings(v); });
-  $("#reload").onclick = () => { loadActive(true); go("home"); };
-  $("#clear").onclick = async () => { await idb.clear(); toast("Saved data cleared"); loadActive(true); };
-}
 function editPlaylist(p) {
   const t = p ? p.type : "xtream";
   const isNew = !p; p = p || { id: "p" + Date.now(), type: t, name: "" };
@@ -750,11 +720,65 @@ function closeSheet() { $("#sheet").classList.add("hidden"); $("#sheet").innerHT
 
 // ============================================================ player
 const P = { el: null, boxes: [], sel: 0, item: null, hideT: 0, expanded: false, saveT: 0 };
+let engineSeq = 0;
 class Engine {
-  constructor(video) { this.v = video; this.hls = null; this.ts = null; }
-  destroy() { if (this.hls) { this.hls.destroy(); this.hls = null; } if (this.ts) { try { this.ts.destroy(); } catch (e) {} this.ts = null; } this.v.removeAttribute("src"); try { this.v.load(); } catch (e) {} }
-  load(rawUrl, { live, headers, startAt } = {}) {
+  constructor(video) { this.v = video; this.hls = null; this.ts = null; this.ff = null; this.sid = "b" + (++engineSeq); }
+  destroy() {
+    clearTimeout(this.infoT);
+    if (this.hls) { this.hls.destroy(); this.hls = null; } if (this.ts) { try { this.ts.destroy(); } catch (e) {} this.ts = null; }
+    this.v.removeAttribute("src"); try { this.v.load(); } catch (e) {}
+  }
+  // position / length / seeking work the same whatever is playing (ffmpeg streams start at "offset")
+  time() { return this.ff ? this.ff.offset + (this.v.currentTime || 0) : this.v.currentTime || 0; }
+  duration() { return this.ff ? (this.ff.live ? 0 : this.ff.dur) : (isFinite(this.v.duration) ? this.v.duration : 0); }
+  seek(t) {
+    const d = this.duration(); t = Math.max(0, d ? Math.min(t, d - 2) : t);
+    if (this.ff && !this.ff.live) this.ffPlay({ ...this.ff, offset: t });
+    else try { this.v.currentTime = t; } catch (e) {}
+  }
+  /** Mac app: play anything through ffmpeg (copy picture, AAC sound) – see desktop/main.cjs. */
+  ffPlay(o) {
     this.destroy();
+    this.ff = { dur: 0, audios: [], aIdx: null, mode: cfg("convert") === 1 ? "transcode" : "copy", retried: cfg("convert") !== 0, ...o };
+    const f = this.ff;
+    let q = "/play?sid=" + this.sid + "&u=" + encodeURIComponent(f.url) + "&mode=" + f.mode + (f.live ? "&live=1" : "") + (f.offset ? "&ss=" + Math.floor(f.offset) : "") + (f.aIdx != null ? "&a=" + f.aIdx : "");
+    if (f.headers && Object.keys(f.headers).length) q += "&h=" + b64url(JSON.stringify(f.headers));
+    const v = this.v;
+    if (!(window.mpegts && mpegts.getFeatureList().mseLivePlayback)) { this.onerr && this.onerr("player library missing – check the internet connection"); return; }
+    this.ts = mpegts.createPlayer({ type: "mpegts", isLive: true, url: location.origin + q },
+      { enableWorker: true, lazyLoad: false, enableStashBuffer: !f.live, stashInitialSize: f.live ? 128 * 1024 : 1024 * 1024, liveBufferLatencyChasing: !!f.live,
+        liveBufferLatencyMaxLatency: [3, 6, 14][cfg("buffer")], liveBufferLatencyMinRemain: [0.8, 1.5, 4][cfg("buffer")], autoCleanupSourceBuffer: true, autoCleanupMaxBackwardDuration: 60, autoCleanupMinBackwardDuration: 30 });
+    const fail = (why) => {
+      // picture format the player can't show (e.g. MPEG-2) → let ffmpeg convert the picture too
+      if (f.mode === "copy" && !f.retried) { this.ffPlay({ ...f, mode: "transcode", retried: true, offset: this.time() || f.offset }); return; }
+      this.onerr && this.onerr(f.err || why);
+    };
+    this.ts.on(mpegts.Events.ERROR, (t, d, info) => fail(d || t));
+    this.ts.attachMediaElement(v); this.ts.load();
+    v.play().catch(() => {});
+    let tries = 0;
+    const poll = async () => {
+      if (this.ff !== f) return;
+      try {
+        const r = await (await fetch("/info?sid=" + this.sid, { cache: "no-store" })).json();
+        if (r.duration) f.dur = r.duration; if (r.audios && r.audios.length) f.audios = r.audios; if (r.video) f.video = r.video;
+        if (r.error) { f.err = r.error; if (!r.running && !(v.currentTime > 0)) { fail(r.error); return; } }
+        this.onTracks && this.onTracks();
+      } catch (e) {}
+      if (++tries < 8) this.infoT = setTimeout(poll, tries < 4 ? 1000 : 4000);
+    };
+    this.infoT = setTimeout(poll, 800);
+    // nothing decoded after a while although data arrives → try converting the picture
+    setTimeout(() => { if (this.ff === f && f.mode === "copy" && !f.retried && v.readyState < 2 && !f.err) fail("no picture"); }, 9000);
+  }
+  load(rawUrl, { live, headers, startAt, local } = {}) {
+    this.destroy(); this.ff = null;
+    if (DESK && (local || !rawUrl.startsWith(location.origin))) {
+      const plainMp4 = !live && !local && /\.(mp4|m4v|mov)(\?|$)/i.test(rawUrl);
+      if (!plainMp4) return this.ffPlay({ url: local || rawUrl, headers, live: !!live, offset: startAt || 0 });
+      // ordinary MP4 movies play directly (instant seeking); if that fails, ffmpeg takes over
+      this.v.addEventListener("error", () => { if (!this.ff) this.ffPlay({ url: rawUrl, headers, live: false, offset: this.v.currentTime || startAt || 0 }); }, { once: true });
+    }
     const isHls = /\.m3u8?(\?|$)/i.test(rawUrl) || /m3u8/i.test(rawUrl);
     const isTs = /\.ts(\?|$)/i.test(rawUrl) || (/\/live\//.test(rawUrl) && !isHls);
     const needRelay = !!relay().url && !rawUrl.startsWith(location.origin) && (rawUrl.startsWith("http:") || headers);
@@ -763,14 +787,21 @@ class Engine {
     const nativeHls = v.canPlayType("application/vnd.apple.mpegurl");
     if (isHls && (isIOS || !window.Hls || !Hls.isSupported()) && nativeHls) { v.src = url; }
     else if (isHls && window.Hls && Hls.isSupported()) {
-      this.hls = new Hls({ enableWorker: true, maxBufferLength: live ? 20 : 40, liveSyncDurationCount: 3, startPosition: startAt || -1 });
+      const buf = cfg("buffer");
+      this.hls = new Hls({ enableWorker: true, maxBufferLength: live ? [8, 20, 45][buf] : [20, 40, 90][buf], liveSyncDurationCount: [2, 3, 5][buf], startPosition: startAt || -1,
+        capLevelToPlayerSize: false, subtitleDisplay: cfg("subsOn") });
       this.hls.on(Hls.Events.ERROR, (_, d) => {
         if (!d.fatal) return;
         if (d.type === Hls.ErrorTypes.NETWORK_ERROR) { this.hls.startLoad(); this.onerr && this.onerr("network"); }
         else if (d.type === Hls.ErrorTypes.MEDIA_ERROR) this.hls.recoverMediaError();
         else this.onerr && this.onerr(d.details);
       });
-      this.hls.on(Hls.Events.MANIFEST_PARSED, () => this.onTracks && this.onTracks());
+      this.hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        const maxH = OPT.qualityH[cfg("quality")];
+        const ok = this.hls.levels.map((l, i) => [l.height || 0, i]).filter(([h]) => h <= maxH);
+        if (maxH < 99999 && ok.length) this.hls.autoLevelCapping = ok.sort((a, b) => b[0] - a[0])[0][1];
+        this.onTracks && this.onTracks();
+      });
       this.hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => this.onTracks && this.onTracks());
       this.hls.loadSource(url); this.hls.attachMedia(v);
     } else if (isTs && window.mpegts && mpegts.getFeatureList().mseLivePlayback) {
@@ -782,11 +813,12 @@ class Engine {
     v.play().catch(() => {});
   }
   audioTracks() {
+    if (this.ff) return this.ff.audios.map((a, i) => ({ id: i, label: (a.lang ? a.lang.toUpperCase() + " · " : "") + a.codec.toUpperCase(), on: i === (this.ff.aIdx || 0) }));
     if (this.hls) return this.hls.audioTracks.map((t, i) => ({ id: i, label: t.name || t.lang || "Track " + (i + 1), on: i === this.hls.audioTrack }));
     const a = this.v.audioTracks; if (!a) return [];
     return Array.from(a).map((t, i) => ({ id: i, label: t.label || t.language || "Track " + (i + 1), on: t.enabled }));
   }
-  setAudio(i) { if (this.hls) this.hls.audioTrack = i; else if (this.v.audioTracks) Array.from(this.v.audioTracks).forEach((t, j) => t.enabled = j === i); }
+  setAudio(i) { if (this.ff) { this.ffPlay({ ...this.ff, aIdx: i, offset: this.ff.live ? 0 : this.time(), mode: this.ff.mode }); return; } if (this.hls) this.hls.audioTrack = i; else if (this.v.audioTracks) Array.from(this.v.audioTracks).forEach((t, j) => t.enabled = j === i); }
   subTracks() {
     if (this.hls) return this.hls.subtitleTracks.map((t, i) => ({ id: i, label: t.name || t.lang || "Sub " + (i + 1), on: i === this.hls.subtitleTrack }));
     return Array.from(this.v.textTracks || []).filter((t) => t.kind !== "metadata").map((t, i) => ({ id: i, label: t.label || t.language || "Sub " + (i + 1), on: t.mode === "showing" }));
@@ -815,32 +847,60 @@ function openPlayer(item, ctx = {}) {
   drawUi(); showUi();
 }
 async function startItem(item, bi) {
-  const b = P.boxes[bi]; b.item = item;
+  const b = P.boxes[bi]; if (b.item !== item) b.retries = 0; b.item = item;
   msg(b, tr("Loading…"));
   clearTimeout(b.deadT); b.deadT = setTimeout(() => msg(b, tr("This channel isn't responding")), 20000);
   let url = item.url;
   try { if (!url && item.getUrl) url = await item.getUrl(); }
   catch (e) { msg(b, tr("Couldn't load") + ": " + e.message); return; }
   if (!url) { msg(b, tr("Couldn't load")); return; }
-  b.eng.onerr = (d) => { if (d !== "network") msg(b, tr("Couldn't load") + " (" + d + ")"); };
-  b.eng.onTracks = () => { if (P.sheetKind) {} };
-  const pos = item.kind !== "live" ? positions()[item.key] : null;
-  b.eng.load(url, { live: item.kind === "live", headers: item.headers, startAt: pos && pos.t > 10 ? pos.t - 3 : 0 });
+  b.eng.onerr = (d) => {
+    if (d === "network") return;
+    if (item.kind === "live" && cfg("autoReconnect") && (b.retries || 0) < 2) { b.retries = (b.retries || 0) + 1; setTimeout(() => { if (b.item === item) startItem(item, bi); }, 2500); msg(b, tr("Reconnecting…")); return; }
+    msg(b, tr("Couldn't load") + " (" + d + ")");
+  };
+  b.eng.onTracks = () => autoTracks(b);
+  b.autoDone = false;
+  const pos = item.kind !== "live" && store.get("resumeVod", true) ? positions()[item.key] : null;
+  b.eng.load(url, { live: item.kind === "live", headers: item.headers, startAt: pos && pos.t > 10 ? pos.t - 3 : 0, local: item.localFile });
   b.video.muted = bi !== P.sel;
-  b.video.className = store.get("aspect", "fit") === "fit" ? "" : store.get("aspect");
+  b.video.className = OPT.aspectCls[cfg("aspect")];
+}
+/** Picks the preferred audio / subtitle language once per stream (Settings → Playback / Subtitles). */
+function autoTracks(b) {
+  if (b.autoDone) return;
+  const pick = (tracks, code) => { const want = LANG3[LANGS[code] ? LANGS[code][0] : ""] || []; if (!want.length) return -1;
+    return tracks.findIndex((t) => want.some((w) => String(t.label || "").toLowerCase().startsWith(w) || String(t.lang || "").toLowerCase() === w)); };
+  const aud = b.eng.audioTracks();
+  if (aud.length > 1) {
+    const i = pick(b.eng.ff ? b.eng.ff.audios.map((a) => ({ lang: a.lang, label: a.lang })) : aud, cfg("audioLang"));
+    b.autoDone = true;
+    if (i >= 0 && !aud[i].on) b.eng.setAudio(i);
+  }
+  const subs = b.eng.subTracks();
+  if (subs.length && cfg("subsOn")) { const i = pick(subs, cfg("subsLang")); if (i >= 0) b.eng.setSub(i); }
 }
 function msg(b, t) { const m = $(".msg", b.box); if (!t) { m.classList.add("hidden"); return; } m.textContent = t; m.classList.remove("hidden"); }
 function wireVideo(b) {
   const v = b.video;
   v.addEventListener("playing", () => { clearTimeout(b.deadT); msg(b, ""); drawControls(); });
   v.addEventListener("pause", drawControls);
-  v.addEventListener("waiting", () => { clearTimeout(b.deadT); b.deadT = setTimeout(() => msg(b, tr("This channel isn't responding")), 20000); });
+  v.addEventListener("waiting", () => {
+    clearTimeout(b.deadT);
+    b.deadT = setTimeout(() => {
+      // self-healing: a live channel that stopped for 12 s is restarted (up to 3 times in a row)
+      if (b.item && b.item.kind === "live" && (cfg("selfHeal") || cfg("autoReconnect")) && (b.heals || 0) < 3) { b.heals = (b.heals || 0) + 1; startItem(b.item, P.boxes.indexOf(b)); return; }
+      msg(b, tr("This channel isn't responding"));
+    }, 12000);
+  });
+  v.addEventListener("playing", () => { b.heals = 0; });
   v.addEventListener("error", () => { if (!b.eng.hls && !b.eng.ts) msg(b, tr("Couldn't load") + (isIOS ? " – iPhone can't play this format" : "")); });
   v.addEventListener("timeupdate", () => {
     if (P.boxes.indexOf(b) !== P.sel) return;
     const it = b.item; if (!it || it.kind === "live") return;
-    const sk = $("#pseek"); if (sk && !sk._drag && v.duration) { sk.max = v.duration; sk.value = v.currentTime; $("#pt1").textContent = fmtTime(v.currentTime); $("#pt2").textContent = "-" + fmtTime(v.duration - v.currentTime); }
-    if (Date.now() - (P.saveT || 0) > 5000 && v.duration) { P.saveT = Date.now(); savePos(it.key, v.currentTime, v.duration, { title: it.title, poster: it.poster, kind: it.kind, ref: it.ref, url: it.url, pl: S.activeId, group: it.group }); }
+    const ct = b.eng.time(), du = b.eng.duration();
+    const sk = $("#pseek"); if (sk && !sk._drag && du) { sk.max = du; sk.value = ct; $("#pt1").textContent = fmtTime(ct); $("#pt2").textContent = "-" + fmtTime(du - ct); }
+    if (Date.now() - (P.saveT || 0) > 5000 && du && store.get("resumeVod", true)) { P.saveT = Date.now(); savePos(it.key, ct, du, { title: it.title, poster: it.poster, kind: it.kind, ref: it.ref, url: it.url, pl: S.activeId, group: it.group }); }
   });
   v.addEventListener("ended", () => { const it = b.item; if (it && it.episodes && it.epIndex + 1 < it.episodes.length) nextEpisode(); });
 }
@@ -848,7 +908,7 @@ function nextEpisode() { const it = P.boxes[P.sel].item; const e = it.episodes[i
   const n = { ...it, key: "e:" + e.id, title: it.series.name + " – S" + e.season + "E" + e.episode + " " + (e.title || ""), url: e.url, epIndex: it.epIndex + 1 }; P.item = n; startItem(n, P.sel); drawUi(); }
 function closePlayer(fromPop) {
   const b0 = P.boxes[0]; const it = b0 && b0.item;
-  if (it && it.kind !== "live" && b0.video.duration) savePos(it.key, b0.video.currentTime, b0.video.duration, { title: it.title, poster: it.poster, kind: it.kind, ref: it.ref, url: it.url, pl: S.activeId, group: it.group });
+  if (it && it.kind !== "live" && b0.eng.duration() && store.get("resumeVod", true)) savePos(it.key, b0.eng.time(), b0.eng.duration(), { title: it.title, poster: it.poster, kind: it.kind, ref: it.ref, url: it.url, pl: S.activeId, group: it.group });
   P.boxes.forEach((b) => { clearTimeout(b.deadT); b.eng.destroy(); });
   if (P.boxes.length > 1) { P.boxes[1].box.remove(); P.boxes.length = 1; $(".stage").classList.remove("multi"); }
   P.sel = 0; $("#player").classList.add("hidden"); closeSheet();
@@ -877,7 +937,8 @@ function chItem(c) {
 function zap(d) {
   const ctx = P.ctx; if (!ctx || !ctx.list || !P.boxes[P.sel].item || P.boxes[P.sel].item.kind !== "live") return;
   ctx.index = (ctx.index + d + ctx.list.length) % ctx.list.length;
-  const c = ctx.list[ctx.index]; addRecent(c.id); P.item = chItem(c); startItem(P.item, P.sel); drawUi(); showUi();
+  const c = ctx.list[ctx.index]; addRecent(c.id); P.item = chItem(c); startItem(P.item, P.sel); drawUi();
+  if (cfg("zapOsd")) showUi(); else $("#player .ui").classList.add("off");
 }
 function setupSwipe(el) {
   let x0 = 0, y0 = 0, t0 = 0;
@@ -891,14 +952,15 @@ function setupSwipe(el) {
   }, { passive: true });
   document.addEventListener("keydown", (e) => {
     if ($("#player").classList.contains("hidden")) return;
-    if (e.key === "ArrowUp" || e.key === "PageUp") zap(-1); else if (e.key === "ArrowDown" || e.key === "PageDown") zap(1);
+    const inv = cfg("invertZap") ? -1 : 1;
+    if (e.key === "ArrowUp" || e.key === "PageUp") { zap(-inv); return; } else if (e.key === "ArrowDown" || e.key === "PageDown") { zap(inv); return; }
     else if (e.key === " ") { e.preventDefault(); const v = P.boxes[P.sel].video; v.paused ? v.play() : v.pause(); } else if (e.key === "Escape" && !document.fullscreenElement) closePlayer();
-    else if (e.key === "ArrowRight") P.boxes[P.sel].video.currentTime += 10; else if (e.key === "ArrowLeft") P.boxes[P.sel].video.currentTime -= 10;
+    else if (e.key === "ArrowRight") { const g = P.boxes[P.sel].eng; g.seek(g.time() + 10); } else if (e.key === "ArrowLeft") { const g = P.boxes[P.sel].eng; g.seek(g.time() - 10); }
     else if (e.key === "f" || e.key === "F") fullscreen(); else if (e.key === "Enter") setExpanded(!P.expanded);
     showUi();
   });
 }
-function showUi() { const u = $("#player .ui"); u.classList.remove("off"); clearTimeout(P.hideT); P.hideT = setTimeout(() => { if (!P.expanded && $("#sheet").classList.contains("hidden")) u.classList.add("off"); }, 4500); }
+function showUi() { const u = $("#player .ui"); u.classList.remove("off"); clearTimeout(P.hideT); P.hideT = setTimeout(() => { if (!P.expanded && $("#sheet").classList.contains("hidden")) u.classList.add("off"); }, OPT.osdS[cfg("osd")] * 1000); }
 function toggleUi() { const u = $("#player .ui"); if (u.classList.contains("off")) showUi(); else { u.classList.add("off"); setExpanded(false); } }
 function setExpanded(on) {
   const it = P.boxes[P.sel].item; if (!it || it.kind !== "live" || !P.ctx || !P.ctx.list) on = false;
@@ -935,7 +997,7 @@ function drawUi() {
   $("#pfav").onclick = () => { toggleFav(it.key); drawUi(); };
   $("#popts").onclick = optionsSheet;
   const sk = $("#pseek");
-  if (sk) { sk.oninput = () => { sk._drag = true; $("#pt1").textContent = fmtTime(+sk.value); }; sk.onchange = () => { sk._drag = false; P.boxes[P.sel].video.currentTime = +sk.value; }; }
+  if (sk) { sk.oninput = () => { sk._drag = true; $("#pt1").textContent = fmtTime(+sk.value); }; sk.onchange = () => { sk._drag = false; P.boxes[P.sel].eng.seek(+sk.value); }; }
   if (hasStrip) {
     $("#phandle").onclick = () => setExpanded(!P.expanded);
     $$("#pstrip [data-ch]").forEach((t) => t.onclick = () => { const c2 = P.ctx.list.find((x) => x.id === t.dataset.ch); if (c2) { P.ctx.index = P.ctx.list.indexOf(c2); addRecent(c2.id); P.item = chItem(c2); startItem(P.item, P.sel); drawUi(); setExpanded(false); } });
@@ -949,7 +1011,7 @@ function fullscreen() {
 }
 function optionsSheet() {
   const b = P.boxes[P.sel], eng = b.eng, it = b.item, live = it.kind === "live";
-  const aud = eng.audioTracks(), subs = eng.subTracks(), lv = eng.levels(), asp = store.get("aspect", "fit");
+  const aud = eng.audioTracks(), subs = eng.subTracks(), lv = eng.levels(), asp = ["fit", "fill", "stretch"][cfg("aspect")];
   const row = (id, label, val) => '<button class="item" data-o="' + id + '">' + esc(label) + (val != null ? '<span class="v">' + esc(val) + "</span>" : "") + "</button>";
   sheet("<h3>" + tr("Options") + '</h3><div class="list">' +
     (live ? row("prev", tr("Previous channel")) + row("next", tr("Next channel")) + row("multi", P.boxes.length > 1 ? tr("Close second screen") : tr("Multiview – watch 2 channels")) : row("b10", tr("Back 10 s")) + row("f10", tr("Forward 10 s"))) +
@@ -965,11 +1027,11 @@ function optionsSheet() {
   const act = {
     recnow: () => recordItem(it, 0), recprog: () => { const nn = nowNext(it.ch); recordItem(it, nn.now ? nn.now.e + 60000 : 0, nn.now && nn.now.t); },
     recstop: () => { const rj = JOBS.find((j) => j.type === "record" && j.state === "recording" && j.name === it.title); if (rj) DESK.stop(rj.id); },
-    prev: () => zap(-1), next: () => zap(1), b10: () => b.video.currentTime -= 10, f10: () => b.video.currentTime += 10, fav: () => { toggleFav(it.key); drawUi(); }, multi: toggleMulti,
+    prev: () => zap(-1), next: () => zap(1), b10: () => eng.seek(eng.time() - 10), f10: () => eng.seek(eng.time() + 10), fav: () => { toggleFav(it.key); drawUi(); }, multi: toggleMulti,
     reload: () => startItem(it, P.sel), pip: () => { try { b.video.requestPictureInPicture ? b.video.requestPictureInPicture() : b.video.webkitSetPresentationMode("picture-in-picture"); } catch (e) { toast("Not supported here"); } },
-    info: () => { $("#sinfo").textContent = (b.video.videoWidth ? b.video.videoWidth + "×" + b.video.videoHeight + " · " : "") + (eng.hls ? "HLS (hls.js)" : eng.ts ? "MPEG-TS (mpegts.js)" : "native") + (relay().url ? " · relay" : ""); return true; } };
+    info: () => { $("#sinfo").textContent = (b.video.videoWidth ? b.video.videoWidth + "×" + b.video.videoHeight + " · " : "") + (eng.ff ? "ffmpeg · " + (eng.ff.mode === "copy" ? "picture passed through" : "picture converted") + (eng.ff.video ? " · " + eng.ff.video : "") : eng.hls ? "HLS (hls.js)" : eng.ts ? "MPEG-TS (mpegts.js)" : "native") + (relay().url ? " · relay" : ""); return true; } };
   $$("[data-o]").forEach((x) => x.onclick = () => { const keep = act[x.dataset.o](); if (!keep) closeSheet(); });
-  $$("#asp button").forEach((x) => x.onclick = () => { store.set("aspect", x.dataset.a); P.boxes.forEach((bb) => bb.video.className = x.dataset.a === "fit" ? "" : x.dataset.a); optionsSheet(); });
+  $$("#asp button").forEach((x) => x.onclick = () => { const i = ["fit", "fill", "stretch"].indexOf(x.dataset.a); store.set("set.aspect", i); P.boxes.forEach((bb) => bb.video.className = OPT.aspectCls[i]); optionsSheet(); });
   $$("[data-au]").forEach((x) => x.onclick = () => { eng.setAudio(+x.dataset.au); closeSheet(); });
   $$("[data-sb]").forEach((x) => x.onclick = () => { eng.setSub(+x.dataset.sb); closeSheet(); });
   $$("[data-lv]").forEach((x) => x.onclick = () => { eng.setLevel(+x.dataset.lv); closeSheet(); });
@@ -1032,7 +1094,7 @@ function renderLibrary(v) {
   $$("[data-a]", v).forEach((b) => b.onclick = () => {
     const j = JOBS.find((x) => x.id === b.dataset.j); if (!j) return;
     const a = b.dataset.a;
-    if (a === "play") openPlayer({ kind: "movie", key: "f:" + j.id, title: j.name + (j.title ? " – " + j.title : ""), url: location.origin + "/local?p=" + encodeURIComponent(j.file), group: tr("Library") });
+    if (a === "play") openPlayer({ kind: "movie", key: "f:" + j.id, title: j.name + (j.title ? " – " + j.title : ""), url: location.origin + "/local?p=" + encodeURIComponent(j.file), localFile: j.file, group: tr("Library") });
     if (a === "open") DESK.open(j.file);
     if (a === "show") DESK.show(j.file);
     if (a === "stop") DESK.stop(j.id);
@@ -1057,8 +1119,14 @@ setInterval(() => { const c = clock(Date.now()); const a = $("#hclock"); if (a) 
       if (!$("#player").classList.contains("hidden") && $("#sheet").classList.contains("hidden")) drawUi();
     });
   }
+  applyLook();
+  const st = OPT.startTab[cfg("start")];
+  if (st === "fav") { S.tab = "live"; S.startFav = true; } else if (st !== "last") S.tab = st;
   renderNav();
-  loadActive().catch((e) => console.error(e));
+  loadActive().then(() => {
+    if (S.startFav) { S.liveGroup = "__fav"; S.groupChosen = true; if (S.tab === "live") render(); }
+    if (cfg("autoPlayLast")) { const id = store.get("recent." + S.activeId, [])[0]; const c = S.live.find((x) => x.id === id); if (c) playChannel(c, S.byGroup.get(c.group) || S.live); }
+  }).catch((e) => console.error(e));
   // Saved lists open instantly; a first download shows its own progress, so the intro never waits for the network.
   setTimeout(() => $("#intro").classList.add("done"), 1600);
 })();

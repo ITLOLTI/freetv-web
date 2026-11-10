@@ -22,13 +22,18 @@ jobs:
       - name: Put the FreeTV app inside the Mac app
         run: |
           mkdir -p desktop/app
-          cp index.html app.js i18n.js style.css worker.js manifest.webmanifest *.png desktop/app/
+          cp index.html *.js style.css manifest.webmanifest *.png desktop/app/
 
       - name: Install
         working-directory: desktop
         env:
           npm_config_arch: ${{ matrix.arch }}
-        run: npm install --no-audit --no-fund
+        run: |
+          npm install --no-audit --no-fund
+          # the Mac app carries its own copy of the video libraries (works even if the CDN is slow)
+          cp node_modules/hls.js/dist/hls.min.js node_modules/mpegts.js/dist/mpegts.js app/
+          sed -i '' -e 's#https://cdn.jsdelivr.net/npm/hls.js@[^"]*#hls.min.js#' -e 's#https://cdn.jsdelivr.net/npm/mpegts.js@[^"]*#mpegts.js#' app/index.html
+          grep -n "script src" app/index.html
 
       - name: Build the .dmg
         working-directory: desktop

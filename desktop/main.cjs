@@ -139,6 +139,83 @@ function pump() {
   for (let i = 0; i < Math.min(next.length, 2 - active); i++) runDownload(next[i].id).then(pump);
 }
 
+// ---------------------------------------------------------------- playback through ffmpeg
+// Chromium can't decode AC3/E-AC3/DTS/MP2 audio or MPEG-2 video – common in IPTV and MKV movies.
+// ffmpeg passes the picture through untouched, turns the sound into AAC and sends MPEG-TS to the
+// player. If the picture itself can't be shown, the app asks again with mode=transcode (H.264 via the
+// Mac's hardware encoder). Seeking in a movie restarts ffmpeg at the new position (ss).
+const sessions = new Map();               // sid → { proc, duration, video, audios, error }
+let h264Enc = null;
+function pickH264() {
+  if (h264Enc) return h264Enc;
+  try {
+    const out = require("node:child_process").execFileSync(ffmpegPath(), ["-hide_banner", "-encoders"], { encoding: "utf8", timeout: 8000 });
+    h264Enc = out.includes("h264_videotoolbox") ? "h264_videotoolbox" : "libx264";
+  } catch (e) { h264Enc = "libx264"; }
+  return h264Enc;
+}
+function headerArgs(headers) {
+  const args = [], h = { ...(headers || {}) };
+  args.push("-user_agent", h["User-Agent"] || "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36");
+  delete h["User-Agent"];
+  if (Object.keys(h).length) args.push("-headers", Object.entries(h).map(([k, v]) => k + ": " + v).join("\r\n") + "\r\n");
+  return args;
+}
+function killSession(sid) {
+  const s = sessions.get(sid);
+  if (!s || !s.proc || s.proc.exitCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    s.proc.once("close", resolve);
+    try { s.proc.kill("SIGKILL"); } catch (e) { resolve(); }
+    setTimeout(resolve, 800);
+  });
+}
+async function play(req, res, u) {
+  const sid = u.searchParams.get("sid") || "0";
+  const url = u.searchParams.get("u");
+  if (!url) { res.writeHead(400); return res.end(); }
+  let headers = null;
+  try { const h = u.searchParams.get("h"); if (h) headers = JSON.parse(Buffer.from(h.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")); } catch (e) {}
+  const ss = +u.searchParams.get("ss") || 0;
+  const mode = u.searchParams.get("mode") || "copy";
+  const aIdx = u.searchParams.get("a");
+  const live = u.searchParams.get("live") === "1";
+  await killSession(sid);                  // providers often allow only one connection at a time
+  const isHttp = /^https?:/i.test(url);
+  const args = ["-hide_banner", "-nostdin", "-loglevel", "info", ...(isHttp ? headerArgs(headers) : [])];
+  if (isHttp) args.push("-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1", "-reconnect_delay_max", "5");
+  args.push("-fflags", "+genpts+discardcorrupt", "-analyzeduration", "2500000", "-probesize", "2500000");
+  if (ss > 0) args.push("-ss", String(ss));
+  args.push("-i", url, "-map", "0:v:0?", "-map", aIdx != null ? "0:a:" + aIdx + "?" : "0:a:0?", "-sn", "-dn");
+  if (mode === "transcode") {
+    const enc = pickH264();
+    args.push("-c:v", enc, "-pix_fmt", "yuv420p", ...(enc === "libx264" ? ["-preset", "veryfast", "-crf", "21", "-tune", "zerolatency"] : ["-b:v", "8M", "-realtime", "1"]), "-g", "50");
+    args.push("-vf", "yadif=deint=interlaced");
+  } else args.push("-c:v", "copy");
+  args.push("-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000");
+  if (live) args.push("-max_muxing_queue_size", "1024");
+  args.push("-f", "mpegts", "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0", "pipe:1");
+  const proc = spawn(ffmpegPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
+  const s = { proc, duration: 0, video: "", audios: [], error: "", started: Date.now() };
+  sessions.set(sid, s);
+  let err = "";
+  proc.stderr.on("data", (d) => {
+    err = (err + d).slice(-20000);
+    const dm = /Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(err);
+    if (dm && !s.duration) s.duration = +dm[1] * 3600 + +dm[2] * 60 + +dm[3];
+    if (!s.video) { const vm = /Stream #0:\d+[^:]*: Video: (\w+)[^\n]*?(\d{3,4})x(\d{3,4})/.exec(err); if (vm) s.video = vm[1] + " " + vm[2] + "×" + vm[3]; }
+    if (!s.audios.length && /Output #0/.test(err)) {
+      const head = err.split("Output #0")[0];
+      s.audios = [...head.matchAll(/Stream #0:\d+(?:\[[^\]]*\])?(?:\((\w+)\))?: Audio: (\w+)[^\n]*/g)].map((m, i) => ({ id: i, lang: m[1] || "", codec: m[2] }));
+    }
+  });
+  proc.on("close", (code) => { if (code && !res.headersSent) { s.error = err.split("\n").filter((l) => /error|invalid|not|fail|refused|forbidden|denied/i.test(l)).slice(-3).join(" ") || "ffmpeg " + code; } });
+  res.writeHead(200, { "Content-Type": "video/mp2t", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+  proc.stdout.pipe(res);
+  proc.on("close", () => { if (!s.error && err && proc.exitCode) s.error = err.split("\n").slice(-3).join(" "); res.end(); });
+  res.on("close", () => { if (sessions.get(sid) === s) { try { proc.kill("SIGKILL"); } catch (e) {} } });
+}
+
 // ---------------------------------------------------------------- local web server: app files + relay + local files
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css", ".png": "image/png", ".json": "application/json", ".webmanifest": "application/manifest+json",
   ".mp4": "video/mp4", ".m4v": "video/mp4", ".mkv": "video/x-matroska", ".ts": "video/mp2t", ".webm": "video/webm", ".avi": "video/x-msvideo", ".mov": "video/quicktime" };
@@ -170,6 +247,12 @@ async function handle(req, res, port) {
     res.on("close", () => s.destroy());                       // channel changed → stop pulling the old stream
     s.on("error", () => res.destroy());
     return s.pipe(res);
+  }
+  if (u.pathname === "/play") return play(req, res, u);
+  if (u.pathname === "/info") {
+    const s = sessions.get(u.searchParams.get("sid") || "0") || {};
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    return res.end(JSON.stringify({ duration: s.duration || 0, video: s.video || "", audios: s.audios || [], error: s.error || "", running: !!(s.proc && s.proc.exitCode === null) }));
   }
   if (u.pathname === "/local") {                             // play downloaded / recorded files
     const p = path.resolve(u.searchParams.get("p") || "");
@@ -233,4 +316,4 @@ app.whenReady().then(async () => { try {
   win.loadURL("http://127.0.0.1:" + port + "/");
 } catch (e) { const m = logErr("start", e); dialog.showErrorBox("FreeTV could not start", m); app.quit(); } });
 app.on("window-all-closed", () => app.quit());
-app.on("before-quit", () => { for (const r of running.values()) try { r.kill(); } catch (e) {} saveCfg(); });
+app.on("before-quit", () => { for (const r of running.values()) try { r.kill(); } catch (e) {} for (const s of sessions.values()) try { s.proc.kill("SIGKILL"); } catch (e) {} saveCfg(); });
