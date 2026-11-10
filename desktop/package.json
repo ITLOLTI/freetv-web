@@ -1,7 +1,7 @@
 {
   "name": "freetv-mac",
   "productName": "FreeTV",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "FreeTV for Mac \u2013 IPTV player with recording and downloads",
   "main": "main.cjs",
   "author": "ITLOLTI",

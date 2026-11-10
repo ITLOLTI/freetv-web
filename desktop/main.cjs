@@ -40,7 +40,9 @@ const PORT_FIRST = 47811;                 // fixed port → your saved playlists
 const userDir = () => app.getPath("userData");
 const cfgFile = () => path.join(userDir(), "freetv-mac.json");
 let cfg = { folder: "", jobs: [] };
-function loadCfg() { try { cfg = { ...cfg, ...JSON.parse(fs.readFileSync(cfgFile(), "utf8")) }; } catch (e) {} if (!cfg.folder) cfg.folder = path.join(app.getPath("movies"), "FreeTV"); }
+function loadCfg() { try { cfg = { ...cfg, ...JSON.parse(fs.readFileSync(cfgFile(), "utf8")) }; } catch (e) {} if (!cfg.folder) cfg.folder = path.join(moviesDir(), "FreeTV"); }
+// macOS "Movies" folder (Electron calls it "videos"); fall back to ~/Movies
+function moviesDir() { try { return app.getPath("videos"); } catch (e) { return path.join(os.homedir(), "Movies"); } }
 let saveT = 0;
 function saveCfg() { clearTimeout(saveT); saveT = setTimeout(() => { try { fs.writeFileSync(cfgFile(), JSON.stringify(cfg, null, 1)); } catch (e) {} }, 300); }
 const running = new Map();               // id → { kill() }
