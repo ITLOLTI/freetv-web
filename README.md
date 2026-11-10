@@ -9,6 +9,20 @@ FreeTV in the browser – for iPhone, Android phones, tablets and computers.
 - **Search** across channels, movies and series (Albanian channels first)
 - English / Shqip, subscription expiry (Xtream), everything saved on your device only
 
+## FreeTV for Mac
+
+The same app as a real Mac app – **no relay needed**, plus:
+
+- **Record live channels** – while watching: Options ⚙ → *Record now* or *Record this programme* (stops by itself when the programme ends). Saved as `.ts` with no quality loss.
+- **Download movies and episodes** – *Download* on a movie, the ⬇ button on an episode, or *Download season*. Downloads can be paused and resumed.
+- **Library** tab: everything recorded and downloaded – play it in FreeTV, open it in QuickTime/VLC, or show it in Finder.
+- **Destination folder:** Settings → *Recordings & downloads → Choose folder…* (default: `Movies/FreeTV`).
+
+**Get it:** GitHub → **Actions** → the latest *Build FreeTV for Mac* run → download **FreeTV-Mac-AppleSilicon** (M1/M2/M3/M4 Macs) or **FreeTV-Mac-Intel** → unzip → open the `.dmg` → drag FreeTV into Applications.
+
+**First launch:** the app isn't from the App Store, so macOS asks once. Right-click FreeTV in Applications → **Open** → **Open**. If macOS says the app is *damaged*, open Terminal and run:
+`xattr -cr /Applications/FreeTV.app` – then open it again.
+
 ## Open it
 
 `https://itlolti.github.io/freetv-web/`

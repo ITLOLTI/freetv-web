@@ -1,0 +1,42 @@
+name: Build FreeTV for Mac
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [arm64, x64]        # arm64 = Apple Silicon (M1–M4), x64 = Intel Macs
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Put the FreeTV app inside the Mac app
+        run: |
+          mkdir -p desktop/app
+          cp index.html app.js i18n.js style.css worker.js manifest.webmanifest *.png desktop/app/
+
+      - name: Install
+        working-directory: desktop
+        env:
+          npm_config_arch: ${{ matrix.arch }}
+        run: npm install --no-audit --no-fund
+
+      - name: Build the .dmg
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --mac dmg --${{ matrix.arch }} --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FreeTV-Mac-${{ matrix.arch == 'arm64' && 'AppleSilicon' || 'Intel' }}
+          path: desktop/dist/*.dmg

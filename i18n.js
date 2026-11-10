@@ -21,6 +21,12 @@ const SQ = {
   "Pick a channel for the second screen": "Zgjidh një kanal për ekranin e dytë", "No playlist yet": "Ende pa listë",
   "Add your M3U, Xtream or MAC portal to start watching.": "Shto listën tënde M3U, Xtream ose portal MAC për të filluar.",
   "Nothing here yet": "Ende asgjë këtu", "TV Guide": "Udhëzuesi TV", "Today": "Sot", "Back 10 s": "Prapa 10 s", "Forward 10 s": "Përpara 10 s",
+  "Library": "Biblioteka", "Download": "Shkarko", "Download season": "Shkarko sezonin", "Download started": "Shkarkimi filloi", "episodes added to downloads": "episode u shtuan te shkarkimet",
+  "Record now": "Regjistro tani", "Record this programme": "Regjistro këtë program", "until": "deri në", "Stop recording": "Ndalo regjistrimin", "Recording started": "Regjistrimi filloi",
+  "Recording until": "Po regjistron deri në", "Couldn't record": "Nuk u regjistrua", "Recording": "Po regjistron", "Downloading": "Po shkarkon", "Waiting": "Në pritje", "Paused": "Në pauzë", "Failed": "Dështoi",
+  "Open": "Hap", "Stop": "Ndalo", "Pause": "Pauzë", "Show in Finder": "Shfaq në Finder", "Open folder": "Hap dosjen", "Recordings": "Regjistrimet", "Downloads": "Shkarkimet",
+  "While watching a channel: Options ⚙ → Record now.": "Gjatë shikimit të një kanali: Opsionet ⚙ → Regjistro tani.", "Open a movie or series and press Download.": "Hap një film ose serial dhe shtyp Shkarko.",
+  "Remove from list (keep the file)": "Hiqe nga lista (mbaje skedarin)", "Delete the file too": "Fshi edhe skedarin", "Recordings & downloads": "Regjistrimet & shkarkimet", "Folder": "Dosja", "Choose folder…": "Zgjidh dosjen…",
   "Fullscreen": "Ekran i plotë", "Picture in picture": "Foto në foto", "Groups": "Grupet", "Recent": "Të fundit", "Detected": "U gjetën",
 };
 let LANG = (() => { try { return JSON.parse(localStorage.getItem("ftv.lang")) || "en"; } catch (e) { return "en"; } })();

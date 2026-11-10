@@ -45,6 +45,9 @@ const I = {
   series: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M6 3h12"/><path d="m10 11 5 3-5 3z"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
+  dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>',
+  lib: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h4v16H4zM10 4h4v16h-4z"/><path d="m16 5 3.8-1 3 15.5-3.8 1z"/></svg>',
+  rec: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="#FF3B30"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>',
   pause: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4.5" width="4" height="15" rx="1"/><rect x="14" y="4.5" width="4" height="15" rx="1"/></svg>',
   back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m15 5-7 7 7 7"/></svg>',
@@ -58,7 +61,11 @@ const I = {
 };
 
 // ============================================================ network (direct, or through the relay)
-const relay = () => ({ url: (store.get("relayUrl", "") || "").trim().replace(/\/+$/, ""), key: store.get("relayKey", "") || "" });
+// Mac app: recordings, downloads and a relay built into the app (window.ftvDesktop comes from the Mac app).
+const DESK = window.ftvDesktop || null;
+let DCFG = null, JOBS = [];
+const relay = () => DESK && DCFG ? { url: location.origin + "/relay", key: DCFG.key }
+  : { url: (store.get("relayUrl", "") || "").trim().replace(/\/+$/, ""), key: store.get("relayKey", "") || "" };
 const b64url = (s) => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 function px(url, headers) {
   const r = relay();
@@ -421,7 +428,8 @@ function updateEpgRow(c) {
 }
 
 // ============================================================ rendering
-const TABS = [["home", "Home", I.home], ["live", "Live TV", I.live], ["movies", "Movies", I.movie], ["series", "Series", I.series], ["search", "Search", I.search], ["settings", "Settings", I.settings]];
+const TABS = [["home", "Home", I.home], ["live", "Live TV", I.live], ["movies", "Movies", I.movie], ["series", "Series", I.series], ["search", "Search", I.search],
+  ...(DESK ? [["library", "Library", I.lib]] : []), ["settings", "Settings", I.settings]];
 function renderNav() {
   const b = TABS.map(([k, l, ic]) => '<button data-tab="' + k + '" class="' + (S.tab === k ? "on" : "") + '">' + ic + "<span>" + tr(l) + "</span></button>").join("");
   $("#tabs").innerHTML = b;
@@ -434,12 +442,12 @@ function render() {
   const v = $("#view");
   if (S.detail) return renderDetail(v);
   const p = active();
-  if (!p && S.tab !== "settings") { v.innerHTML = '<div class="empty"><img src="logo.png" style="width:180px"><h2>' + tr("No playlist yet") + "</h2><p>" + tr("Add your M3U, Xtream or MAC portal to start watching.") +
+  if (!p && S.tab !== "settings" && S.tab !== "library") { v.innerHTML = '<div class="empty"><img src="logo.png" style="width:180px"><h2>' + tr("No playlist yet") + "</h2><p>" + tr("Add your M3U, Xtream or MAC portal to start watching.") +
     '</p><button class="btn primary" id="addPl">' + tr("Add playlist") + "</button></div>"; $("#addPl").onclick = () => editPlaylist(); return; }
-  if (S.loading && S.tab !== "settings") { v.innerHTML = '<div class="empty"><div class="spinner"></div>' + esc(S.progress) + "</div>"; return; }
-  if (S.error && S.tab !== "settings") { v.innerHTML = '<div class="empty">' + esc(S.error) + '<br><br><button class="btn" id="retry">' + tr("Try again") + '</button> <button class="btn" id="toSet">' + tr("Settings") + "</button></div>";
+  if (S.loading && S.tab !== "settings" && S.tab !== "library") { v.innerHTML = '<div class="empty"><div class="spinner"></div>' + esc(S.progress) + "</div>"; return; }
+  if (S.error && S.tab !== "settings" && S.tab !== "library") { v.innerHTML = '<div class="empty">' + esc(S.error) + '<br><br><button class="btn" id="retry">' + tr("Try again") + '</button> <button class="btn" id="toSet">' + tr("Settings") + "</button></div>";
     $("#retry").onclick = () => loadActive(true); $("#toSet").onclick = () => go("settings"); return; }
-  ({ home: renderHome, live: renderLive, movies: (v) => renderVod(v, "movies"), series: (v) => renderVod(v, "series"), search: renderSearch, settings: renderSettings }[S.tab] || renderHome)(v);
+  ({ home: renderHome, live: renderLive, movies: (v) => renderVod(v, "movies"), series: (v) => renderVod(v, "series"), search: renderSearch, settings: renderSettings, library: renderLibrary }[S.tab] || renderHome)(v);
 }
 
 function logoHtml(src, name, cover) {
@@ -600,11 +608,13 @@ async function renderDetail(v) {
   v.innerHTML = '<div class="detail"><div class="bg" style="background-image:url(\'' + esc(imgUrl(it.poster)) + '\')"></div><button class="iconbtn" id="dback">' + I.back + '</button>' +
     '<div class="dtop" style="margin-top:14px"><div class="pi">' + (it.poster ? '<img src="' + esc(imgUrl(it.poster)) + '" alt="">' : "") + '</div><div style="flex:1;min-width:0"><h1 style="margin-top:0">' + esc(it.name) + '</h1><div class="dmeta" id="dmeta">' + esc([it.year, it.genre, it.rating ? "★ " + (+it.rating).toFixed(1) : ""].filter(Boolean).join(" · ")) + '</div>' +
     '<div class="row" style="flex-wrap:wrap">' + (kind === "movies" ? '<button class="btn white" id="dplay">' + I.play + (pos ? tr("Resume") + " " + fmtTime(pos.t) : tr("Play")) + "</button>" : "") +
-    '<button class="btn" id="dfav">' + (isFav(key) ? "✓ " + tr("In My list") : "+ " + tr("Add to My list")) + '</button></div></div></div><div class="plot" id="dplot">' + esc(it.plot || "") + '</div><div id="deps"></div></div>';
+    '<button class="btn" id="dfav">' + (isFav(key) ? "✓ " + tr("In My list") : "+ " + tr("Add to My list")) + "</button>" +
+    (DESK && kind === "movies" && p.type !== "mac" ? '<button class="btn" id="ddl">' + I.dl + tr("Download") + "</button>" : "") + '</div></div></div><div class="plot" id="dplot">' + esc(it.plot || "") + '</div><div id="deps"></div></div>';
   $("#dback").onclick = () => { S.detail = null; render(); };
   $("#dfav").onclick = () => { const on = toggleFav(key); $("#dfav").textContent = on ? "✓ " + tr("In My list") : "+ " + tr("Add to My list"); };
   if (kind === "movies") {
     $("#dplay").onclick = () => playMovie(it);
+    if ($("#ddl")) $("#ddl").onclick = () => { const u = it.url || Xtream.movieUrl(p, it); downloadItem({ title: it.name, url: u, headers: it.headers, ext: it.ext, sub: ["Movies"] }); };
     if (p.type === "xtream") Xtream.movieInfo(p, it).then((info) => {
       if (!S.detail || S.detail.id !== id) return;
       if (info.plot) $("#dplot").textContent = info.plot;
@@ -622,10 +632,14 @@ async function renderDetail(v) {
   let cur = seasons[0];
   const draw = () => {
     const list = eps.filter((e) => e.season === cur).sort((a, b) => a.episode - b.episode);
-    box.innerHTML = '<h2>' + tr("Episodes") + '</h2><div class="chips">' + seasons.map((s) => '<button class="chip ' + (s === cur ? "on" : "") + '" data-s="' + s + '">' + tr("Season") + " " + s + "</button>").join("") + '</div><div class="eps">' +
+    box.innerHTML = '<div class="row"><h2>' + tr("Episodes") + '</h2><span class="sp"></span>' + (DESK ? '<button class="btn" id="dlseason">' + I.dl + tr("Download season") + "</button>" : "") + '</div><div class="chips">' + seasons.map((s) => '<button class="chip ' + (s === cur ? "on" : "") + '" data-s="' + s + '">' + tr("Season") + " " + s + "</button>").join("") + '</div><div class="eps">' +
       list.map((e, i) => { const ps = positions()["e:" + e.id]; return '<button class="ep" data-e="' + i + '"><div class="im">' + (e.image ? '<img loading="lazy" src="' + esc(imgUrl(e.image)) + '" alt="">' : '<span class="ph">' + e.episode + "</span>") +
         '</div><div style="flex:1;min-width:0"><div style="font-weight:600">' + e.episode + ". " + esc(e.title) + '</div><div class="small dim" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">' + esc(e.plot || "") + "</div>" +
-        (ps && ps.d ? '<div class="prog"><i style="width:' + Math.round(ps.t / ps.d * 100) + '%"></i></div>' : "") + "</div></button>"; }).join("") + "</div>";
+        (ps && ps.d ? '<div class="prog"><i style="width:' + Math.round(ps.t / ps.d * 100) + '%"></i></div>' : "") + "</div>" + (DESK ? '<span class="iconbtn" data-dl="' + i + '" title="' + tr("Download") + '">' + I.dl + "</span>" : "") + "</button>"; }).join("") + "</div>";
+    const epDl = (e) => downloadItem({ title: it.name + " S" + pad(e.season) + "E" + pad(e.episode) + (e.title && !/S\d+E\d+/i.test(e.title) ? " " + e.title : ""), url: e.url, headers: e.headers,
+      sub: ["Series", it.name, "Season " + e.season], quiet: true });
+    $$("[data-dl]", box).forEach((b) => b.onclick = (ev) => { ev.stopPropagation(); epDl(list[+b.dataset.dl]); toast(tr("Download started")); });
+    if ($("#dlseason")) $("#dlseason").onclick = () => { list.forEach(epDl); toast(list.length + " " + tr("episodes added to downloads")); };
     $$("[data-s]", box).forEach((b) => b.onclick = () => { cur = +b.dataset.s; draw(); });
     $$("[data-e]", box).forEach((b) => b.onclick = () => { const e = list[+b.dataset.e];
       openPlayer({ kind: "episode", key: "e:" + e.id, title: it.name + " – S" + e.season + "E" + e.episode + " " + (e.title || ""), poster: it.poster, url: e.url, group: it.name,
@@ -671,18 +685,24 @@ function renderSettings(v) {
       (p.id === S.activeId ? '<span class="small" style="color:var(--acc)">' + tr("Active") + "</span>" : '<button class="btn" data-use="' + p.id + '">' + tr("Use") + "</button>") + '<button class="btn" data-edit="' + p.id + '">' + tr("Edit") + "</button></div>").join("") +
     '<button class="item" id="addPl" style="color:var(--acc)">＋ ' + tr("Add playlist") + "</button></div>" +
     (a && a.exp_date ? '<div class="small dim" style="margin:8px 4px">' + tr("Subscription") + " " + tr("expires") + ": " + new Date(a.exp_date * 1000).toLocaleDateString() + " · " + Math.ceil((a.exp_date * 1000 - Date.now()) / 864e5) + " " + tr("days left") + "</div>" : "") +
-    "<h2>" + tr("Relay") + '</h2><div class="glass" style="padding:14px 16px"><div class="small dim">Needed for most IPTV servers (http:// links, MAC portals). See the setup guide in the README.</div>' +
+    (DESK ? "<h2>" + tr("Recordings & downloads") + '</h2><div class="glass" style="padding:14px 16px"><div class="small dim">' + tr("Folder") + '</div><div style="margin:4px 0 12px;word-break:break-all">' + esc(DCFG ? DCFG.folder : "") +
+      '</div><div class="row"><button class="btn primary" id="chf">' + tr("Choose folder…") + '</button><button class="btn" id="opf">' + tr("Open folder") + "</button></div></div>" : "") +
+    (DESK ? "" : "<h2>" + tr("Relay") + '</h2><div class="glass" style="padding:14px 16px"><div class="small dim">Needed for most IPTV servers (http:// links, MAC portals). See the setup guide in the README.</div>' +
     '<label class="f">' + tr("Relay URL") + '</label><input class="in" id="rurl" placeholder="https://freetv-relay.yourname.workers.dev" value="' + esc(r.url) + '" autocapitalize="off">' +
-    '<label class="f">' + tr("Relay key") + '</label><input class="in" id="rkey" value="' + esc(r.key) + '" autocapitalize="off"><div class="row" style="margin-top:12px"><button class="btn primary" id="rsave">' + tr("Save") + '</button><span class="small dim" id="rstat"></span></div></div>' +
+    '<label class="f">' + tr("Relay key") + '</label><input class="in" id="rkey" value="' + esc(r.key) + '" autocapitalize="off"><div class="row" style="margin-top:12px"><button class="btn primary" id="rsave">' + tr("Save") + '</button><span class="small dim" id="rstat"></span></div></div>') +
     "<h2>" + tr("Language") + '</h2><div class="seg" id="lang"><button data-l="en" class="' + (LANG === "en" ? "on" : "") + '">English</button><button data-l="sq" class="' + (LANG === "sq" ? "on" : "") + '">Shqip</button></div>' +
     "<h2>" + tr("Live stream format") + '</h2><div class="seg" id="fmt"><button data-f="m3u8" class="' + (store.get("liveFmt", "m3u8") === "m3u8" ? "on" : "") + '">HLS (.m3u8)</button><button data-f="ts" class="' + (store.get("liveFmt", "m3u8") === "ts" ? "on" : "") + '">MPEG-TS (.ts)</button></div>' +
     '<div class="small dim" style="margin:6px 4px">iPhone needs HLS. Xtream only.</div>' +
     '<div class="list" style="margin-top:22px"><button class="item" id="reload">' + tr("Reload playlist") + '</button><button class="item" id="clear" style="color:var(--bad)">' + tr("Clear saved data") + "</button></div>" +
-    '<div class="small dim" style="text-align:center;margin:24px">FreeTV web 1.0</div>';
+    '<div class="small dim" style="text-align:center;margin:24px">FreeTV ' + (DESK ? "for Mac" : "web") + " 1.0</div>";
   $("#addPl").onclick = () => editPlaylist();
   $$("[data-use]", v).forEach((b) => b.onclick = () => { S.activeId = b.dataset.use; store.set("active", S.activeId); loadActive(); go("home"); });
   $$("[data-edit]", v).forEach((b) => b.onclick = () => editPlaylist(S.playlists.find((p) => p.id === b.dataset.edit)));
-  $("#rsave").onclick = async () => {
+  if (DESK) {
+    $("#chf").onclick = async () => { const f = await DESK.chooseFolder(); if (DCFG) DCFG.folder = f; renderSettings(v); };
+    $("#opf").onclick = () => DESK.open();
+  }
+  if ($("#rsave")) $("#rsave").onclick = async () => {
     store.set("relayUrl", $("#rurl").value.trim()); store.set("relayKey", $("#rkey").value.trim());
     const st = $("#rstat"); st.textContent = "Testing…";
     try { const res = await fetch(relay().url + "/"); st.textContent = res.ok ? "✓ Relay works" : "Relay answered " + res.status; } catch (e) { st.textContent = "✗ Can't reach the relay"; }
@@ -737,7 +757,7 @@ class Engine {
     this.destroy();
     const isHls = /\.m3u8?(\?|$)/i.test(rawUrl) || /m3u8/i.test(rawUrl);
     const isTs = /\.ts(\?|$)/i.test(rawUrl) || (/\/live\//.test(rawUrl) && !isHls);
-    const needRelay = !!relay().url && (rawUrl.startsWith("http:") || headers);
+    const needRelay = !!relay().url && !rawUrl.startsWith(location.origin) && (rawUrl.startsWith("http:") || headers);
     const url = needRelay ? px(rawUrl, headers) : rawUrl;
     const v = this.v;
     const nativeHls = v.canPlayType("application/vnd.apple.mpegurl");
@@ -872,7 +892,9 @@ function setupSwipe(el) {
   document.addEventListener("keydown", (e) => {
     if ($("#player").classList.contains("hidden")) return;
     if (e.key === "ArrowUp" || e.key === "PageUp") zap(-1); else if (e.key === "ArrowDown" || e.key === "PageDown") zap(1);
-    else if (e.key === " ") { const v = P.boxes[P.sel].video; v.paused ? v.play() : v.pause(); } else if (e.key === "Escape") closePlayer();
+    else if (e.key === " ") { e.preventDefault(); const v = P.boxes[P.sel].video; v.paused ? v.play() : v.pause(); } else if (e.key === "Escape" && !document.fullscreenElement) closePlayer();
+    else if (e.key === "ArrowRight") P.boxes[P.sel].video.currentTime += 10; else if (e.key === "ArrowLeft") P.boxes[P.sel].video.currentTime -= 10;
+    else if (e.key === "f" || e.key === "F") fullscreen(); else if (e.key === "Enter") setExpanded(!P.expanded);
     showUi();
   });
 }
@@ -895,7 +917,8 @@ function drawUi() {
   const hasStrip = live && P.ctx && P.ctx.list && P.ctx.list.length > 1;
   const bottom = "calc(var(--bot) + " + (hasStrip ? 64 + 18 : 14) + "px)";
   const fv = isFav(it.key);
-  u.innerHTML = '<div class="ptop"><button class="iconbtn" id="pclose">' + I.back + '</button><span class="sp"></span>' +
+  const recJob = live && JOBS.find((j) => j.type === "record" && j.state === "recording" && j.name === it.title);
+  u.innerHTML = '<div class="ptop"><button class="iconbtn" id="pclose">' + I.back + '</button>' + (recJob ? '<span class="recbadge">● REC ' + fmtTime((Date.now() - recJob.started) / 1000) + "</span>" : "") + '<span class="sp"></span>' +
     (live ? '<button class="iconbtn" id="pprev">' + I.prev + '</button><button class="iconbtn" id="pnext">' + I.next + "</button>" : "") +
     '<button class="iconbtn" id="pfull">' + I.full + "</button></div>" +
     '<div class="pcard" id="pcard" style="bottom:' + bottom + '"><div class="t1"><div class="lgbox">' + logoHtml(it.logo || it.poster, it.title, !live) + '</div><div class="tt"><div class="k">' + esc(live ? it.group : tr(it.kind === "movie" ? "Movies" : "Series")) + (live && it.num ? ' <span class="badge">' + it.num + "</span>" : "") + '</div><div class="n">' + esc(it.title) + "</div>" +
@@ -931,12 +954,18 @@ function optionsSheet() {
   sheet("<h3>" + tr("Options") + '</h3><div class="list">' +
     (live ? row("prev", tr("Previous channel")) + row("next", tr("Next channel")) + row("multi", P.boxes.length > 1 ? tr("Close second screen") : tr("Multiview – watch 2 channels")) : row("b10", tr("Back 10 s")) + row("f10", tr("Forward 10 s"))) +
     row("fav", isFav(it.key) ? tr("Remove from favourites") : tr("Add to favourites")) + "</div>" +
+    (DESK && live ? (() => { const rj = JOBS.find((j) => j.type === "record" && j.state === "recording" && j.name === it.title); const nn = it.ch ? nowNext(it.ch) : {};
+      return '<div class="list" style="margin-top:14px">' + (rj ? row("recstop", "⏹  " + tr("Stop recording"), fmtTime((Date.now() - rj.started) / 1000)) :
+        row("recnow", "⏺  " + tr("Record now")) + (nn.now ? row("recprog", "⏺  " + tr("Record this programme"), tr("until") + " " + clock(nn.now.e)) : "")) + "</div>"; })() : "") +
     '<div class="small dim" style="margin:14px 4px 6px">' + tr("Aspect ratio") + '</div><div class="seg" id="asp">' + [["fit", "Fit"], ["fill", "Fill"], ["stretch", "Stretch"]].map(([k, l]) => '<button data-a="' + k + '" class="' + (asp === k ? "on" : "") + '">' + tr(l) + "</button>").join("") + "</div>" +
     (aud.length > 1 ? '<div class="small dim" style="margin:14px 4px 6px">' + tr("Audio track") + '</div><div class="list">' + aud.map((a) => '<button class="item ' + (a.on ? "on" : "") + '" data-au="' + a.id + '">' + esc(a.label) + (a.on ? '<span class="v">✓</span>' : "") + "</button>").join("") + "</div>" : "") +
     (subs.length ? '<div class="small dim" style="margin:14px 4px 6px">' + tr("Subtitles") + '</div><div class="list"><button class="item" data-sb="-1">' + tr("Off") + "</button>" + subs.map((a) => '<button class="item ' + (a.on ? "on" : "") + '" data-sb="' + a.id + '">' + esc(a.label) + "</button>").join("") + "</div>" : "") +
     (lv.length > 1 ? '<div class="small dim" style="margin:14px 4px 6px">' + tr("Quality") + '</div><div class="list"><button class="item" data-lv="-1">' + tr("Auto") + "</button>" + lv.map((a) => '<button class="item ' + (a.on ? "on" : "") + '" data-lv="' + a.id + '">' + esc(a.label) + "</button>").join("") + "</div>" : "") +
     '<div class="list" style="margin-top:14px">' + row("reload", tr("Reload stream")) + row("pip", tr("Picture in picture")) + row("info", tr("Stream info")) + "</div><div id=\"sinfo\" class=\"small dim\" style=\"margin-top:10px\"></div>");
-  const act = { prev: () => zap(-1), next: () => zap(1), b10: () => b.video.currentTime -= 10, f10: () => b.video.currentTime += 10, fav: () => { toggleFav(it.key); drawUi(); }, multi: toggleMulti,
+  const act = {
+    recnow: () => recordItem(it, 0), recprog: () => { const nn = nowNext(it.ch); recordItem(it, nn.now ? nn.now.e + 60000 : 0, nn.now && nn.now.t); },
+    recstop: () => { const rj = JOBS.find((j) => j.type === "record" && j.state === "recording" && j.name === it.title); if (rj) DESK.stop(rj.id); },
+    prev: () => zap(-1), next: () => zap(1), b10: () => b.video.currentTime -= 10, f10: () => b.video.currentTime += 10, fav: () => { toggleFav(it.key); drawUi(); }, multi: toggleMulti,
     reload: () => startItem(it, P.sel), pip: () => { try { b.video.requestPictureInPicture ? b.video.requestPictureInPicture() : b.video.webkitSetPresentationMode("picture-in-picture"); } catch (e) { toast("Not supported here"); } },
     info: () => { $("#sinfo").textContent = (b.video.videoWidth ? b.video.videoWidth + "×" + b.video.videoHeight + " · " : "") + (eng.hls ? "HLS (hls.js)" : eng.ts ? "MPEG-TS (mpegts.js)" : "native") + (relay().url ? " · relay" : ""); return true; } };
   $$("[data-o]").forEach((x) => x.onclick = () => { const keep = act[x.dataset.o](); if (!keep) closeSheet(); });
@@ -966,9 +995,68 @@ function addSecond(c) {
   startItem(chItem(c), 1);
 }
 
+// ============================================================ Mac: recording, downloads, library
+async function recordItem(it, stopAt, title) {
+  try {
+    const url = it.url || (it.getUrl ? await it.getUrl() : null);
+    if (!url) throw new Error("no stream address");
+    await DESK.record({ name: it.title, url, headers: it.headers, stopAt, title: title || "" });
+    toast(stopAt ? tr("Recording until") + " " + clock(stopAt) : tr("Recording started"));
+  } catch (e) { toast(tr("Couldn't record") + ": " + e.message); }
+}
+async function downloadItem(o) {
+  if (!o.url) { toast("Couldn't load"); return; }
+  await DESK.download(o);
+  if (!o.quiet) toast(tr("Download started") + " – " + tr("Library"));
+}
+const fmtSize = (b) => !b ? "" : b > 1e9 ? (b / 1e9).toFixed(2) + " GB" : (b / 1e6).toFixed(0) + " MB";
+function renderLibrary(v) {
+  const rec = JOBS.filter((j) => j.type === "record"), dl = JOBS.filter((j) => j.type === "download");
+  const stateTxt = { recording: "● " + tr("Recording"), downloading: tr("Downloading"), queued: tr("Waiting"), paused: tr("Paused"), done: "", failed: tr("Failed") };
+  const row = (j) => {
+    const pct = j.total ? Math.round(j.size / j.total * 100) : 0;
+    const info = [stateTxt[j.state], j.type === "record" ? new Date(j.started).toLocaleString(LANG === "sq" ? "sq" : "en-GB", { dateStyle: "short", timeStyle: "short" }) : "",
+      j.state === "downloading" && j.total ? pct + "% · " + fmtSize(j.size) + " / " + fmtSize(j.total) : fmtSize(j.size), j.error].filter(Boolean).join(" · ");
+    const btn = (a, l) => '<button class="btn" data-a="' + a + '" data-j="' + j.id + '">' + l + "</button>";
+    return '<div class="item" style="flex-wrap:wrap"><div style="flex:1;min-width:220px"><div style="font-weight:600">' + esc(j.name + (j.title ? " – " + j.title : "")) + '</div><div class="small ' + (j.state === "failed" ? "" : "dim") + '" style="' + (j.state === "recording" ? "color:#FF453A" : j.state === "failed" ? "color:var(--bad)" : "") + '">' + esc(info) + "</div>" +
+      (j.state === "downloading" || j.state === "paused" || j.state === "queued" ? '<div class="prog" style="height:4px"><i style="width:' + pct + '%;background:var(--acc)"></i></div>' : "") + '</div><div class="row" style="gap:6px">' +
+      (j.state === "done" ? btn("play", tr("Play")) + btn("open", tr("Open")) : "") + (j.state === "recording" ? btn("stop", tr("Stop")) : "") +
+      (j.state === "downloading" || j.state === "queued" ? btn("stop", tr("Pause")) : "") + (j.state === "paused" || (j.state === "failed" && j.type === "download") ? btn("resume", tr("Resume")) : "") +
+      btn("show", tr("Show in Finder")) + btn("del", "✕") + "</div></div>";
+  };
+  v.innerHTML = '<div class="row"><h1>' + tr("Library") + '</h1><span class="sp"></span><button class="btn" id="lfolder">' + tr("Open folder") + "</button></div>" +
+    '<div class="small dim" style="margin-bottom:6px">' + esc(DCFG ? DCFG.folder : "") + "</div>" +
+    "<h2>" + tr("Recordings") + "</h2>" + (rec.length ? '<div class="list">' + rec.map(row).join("") + "</div>" : '<div class="small dim">' + tr("While watching a channel: Options ⚙ → Record now.") + "</div>") +
+    "<h2>" + tr("Downloads") + "</h2>" + (dl.length ? '<div class="list">' + dl.map(row).join("") + "</div>" : '<div class="small dim">' + tr("Open a movie or series and press Download.") + "</div>");
+  $("#lfolder").onclick = () => DESK.open();
+  $$("[data-a]", v).forEach((b) => b.onclick = () => {
+    const j = JOBS.find((x) => x.id === b.dataset.j); if (!j) return;
+    const a = b.dataset.a;
+    if (a === "play") openPlayer({ kind: "movie", key: "f:" + j.id, title: j.name + (j.title ? " – " + j.title : ""), url: location.origin + "/local?p=" + encodeURIComponent(j.file), group: tr("Library") });
+    if (a === "open") DESK.open(j.file);
+    if (a === "show") DESK.show(j.file);
+    if (a === "stop") DESK.stop(j.id);
+    if (a === "resume") DESK.resume(j.id);
+    if (a === "del") {
+      sheet("<h3>" + esc(j.name) + '</h3><div class="list"><button class="item" id="dkeep">' + tr("Remove from list (keep the file)") + '</button><button class="item" id="dboth" style="color:var(--bad)">' + tr("Delete the file too") + "</button></div>");
+      $("#dkeep").onclick = () => { DESK.remove(j.id, false); closeSheet(); };
+      $("#dboth").onclick = () => { DESK.remove(j.id, true); closeSheet(); };
+    }
+  });
+}
+
 // ============================================================ boot
 setInterval(() => { const c = clock(Date.now()); const a = $("#hclock"); if (a) a.textContent = c; const b = $("#pclk"); if (b) b.textContent = c; }, 15000);
-(function boot() {
+(async function boot() {
+  if (DESK) {
+    document.body.classList.add("desk");
+    try { DCFG = await DESK.config(); JOBS = DCFG.jobs || []; } catch (e) {}
+    DESK.onJobs((j) => {
+      JOBS = j;
+      if (S.tab === "library" && !S.detail && $("#player").classList.contains("hidden")) renderLibrary($("#view"));
+      if (!$("#player").classList.contains("hidden") && $("#sheet").classList.contains("hidden")) drawUi();
+    });
+  }
   renderNav();
   loadActive().catch((e) => console.error(e));
   // Saved lists open instantly; a first download shows its own progress, so the intro never waits for the network.

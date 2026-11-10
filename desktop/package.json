@@ -1,0 +1,37 @@
+{
+  "name": "freetv-mac",
+  "productName": "FreeTV",
+  "version": "1.0.0",
+  "description": "FreeTV for Mac – IPTV player with recording and downloads",
+  "type": "module",
+  "main": "main.js",
+  "author": "ITLOLTI",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac dmg --publish never"
+  },
+  "dependencies": {
+    "ffmpeg-static": "^5.2.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.freetv.mac",
+    "productName": "FreeTV",
+    "files": ["main.js", "preload.cjs", "app/**", "node_modules/ffmpeg-static/**", "package.json"],
+    "asarUnpack": ["node_modules/ffmpeg-static/**"],
+    "directories": { "buildResources": "build", "output": "dist" },
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "icon": "build/icon.png",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": ["dmg"]
+    },
+    "dmg": { "title": "FreeTV", "artifactName": "FreeTV-${version}-${arch}.dmg" }
+  }
+}

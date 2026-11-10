@@ -221,3 +221,13 @@ label.f { display: block; margin: 12px 0 4px; font-size: 13px; color: var(--dim)
 .strip .tile.cur .th { border-color: var(--acc); border-width: 2px; }
 .strip .handle { display: block; width: 44px; height: 5px; border-radius: 3px; background: rgba(255,255,255,.35); margin: 0 auto 8px; }
 .side { position: absolute; top: 50%; transform: translateY(-50%); }
+
+/* Mac app */
+.recbadge { margin-left: 8px; padding: 5px 10px; border-radius: 999px; background: rgba(255,59,48,.9); color: #fff; font-size: 12px; font-weight: 700; letter-spacing: .5px; animation: recpulse 2s ease-in-out infinite; }
+@keyframes recpulse { 50% { opacity: .65; } }
+.ep .iconbtn { width: 34px; height: 34px; }
+body.desk #rail { padding-top: 48px; -webkit-app-region: drag; }
+body.desk #rail button, body.desk #rail img { -webkit-app-region: no-drag; }
+body.desk #view { padding-top: 34px; }
+body.desk::after { content: ""; position: fixed; top: 0; left: 220px; right: 0; height: 26px; -webkit-app-region: drag; z-index: 40; }
+body.desk #player .ptop { padding-top: 34px; }

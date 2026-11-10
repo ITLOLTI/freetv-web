@@ -9,6 +9,8 @@
  * Then change KEY below to your own secret word and put the same word in FreeTV → Settings → Relay key.
  */
 const KEY = "change-me-to-a-secret-word";
+// (The Mac app runs this same relay on your own computer, so no Cloudflare is needed there.)
+export const RELAY_KEY = KEY;
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
