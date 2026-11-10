@@ -1,10 +1,9 @@
 {
   "name": "freetv-mac",
   "productName": "FreeTV",
-  "version": "1.0.0",
-  "description": "FreeTV for Mac – IPTV player with recording and downloads",
-  "type": "module",
-  "main": "main.js",
+  "version": "1.0.1",
+  "description": "FreeTV for Mac \u2013 IPTV player with recording and downloads",
+  "main": "main.cjs",
   "author": "ITLOLTI",
   "license": "UNLICENSED",
   "scripts": {
@@ -21,17 +20,32 @@
   "build": {
     "appId": "com.freetv.mac",
     "productName": "FreeTV",
-    "files": ["main.js", "preload.cjs", "app/**", "node_modules/ffmpeg-static/**", "package.json"],
-    "asarUnpack": ["node_modules/ffmpeg-static/**"],
-    "directories": { "buildResources": "build", "output": "dist" },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "app/**",
+      "node_modules/ffmpeg-static/**",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
     "mac": {
       "category": "public.app-category.entertainment",
       "icon": "build/icon.png",
-      "identity": "-",
+      "identity": null,
       "hardenedRuntime": false,
       "gatekeeperAssess": false,
-      "target": ["dmg"]
+      "target": [
+        "dmg"
+      ]
     },
-    "dmg": { "title": "FreeTV", "artifactName": "FreeTV-${version}-${arch}.dmg" }
+    "dmg": {
+      "title": "FreeTV",
+      "artifactName": "FreeTV-${version}-${arch}.dmg"
+    },
+    "asar": false,
+    "afterPack": "build/adhoc-sign.cjs"
   }
 }

@@ -3,19 +3,37 @@
 //  • recording of live channels (ffmpeg, stream copy – no quality loss, little CPU),
 //  • downloads of movies and episodes (resumable),
 //  • a destination folder you choose.
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from "electron";
-import http from "node:http";
-import fs from "node:fs";
-import path from "node:path";
-import { spawn } from "node:child_process";
-import { Readable } from "node:stream";
-import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
-import worker, { RELAY_KEY } from "./app/worker.js";
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require("electron");
+const http = require("node:http");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+const { spawn } = require("node:child_process");
+const { Readable } = require("node:stream");
 
-const require = createRequire(import.meta.url);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const APP_DIR = path.join(__dirname, "app");
+
+// If anything goes wrong at start-up, say so instead of silently quitting.
+const LOG = path.join(os.homedir(), "Library", "Logs", "FreeTV.log");
+function logErr(where, e) {
+  const msg = new Date().toISOString() + " " + where + ": " + (e && e.stack || e) + "\n";
+  try { fs.mkdirSync(path.dirname(LOG), { recursive: true }); fs.appendFileSync(LOG, msg); } catch (x) {}
+  return msg;
+}
+process.on("uncaughtException", (e) => { const m = logErr("crash", e); try { dialog.showErrorBox("FreeTV problem", m + "\nDetails: " + LOG); } catch (x) {} });
+process.on("unhandledRejection", (e) => logErr("promise", e));
+
+// The relay is the same code as the Cloudflare worker (worker.js), loaded here as plain JavaScript.
+function loadRelay() {
+  const src = fs.readFileSync(path.join(APP_DIR, "worker.js"), "utf8")
+    .replace(/export const RELAY_KEY = KEY;/, "const RELAY_KEY = KEY;")
+    .replace(/export default\s*\{/, "module.exports = { RELAY_KEY,");
+  const m = { exports: {} };
+  new Function("module", "exports", src)(m, m.exports);
+  return m.exports;
+}
+const worker = loadRelay();
+const RELAY_KEY = worker.RELAY_KEY;
 const PORT_FIRST = 47811;                 // fixed port → your saved playlists/favourites stay put between launches
 
 // ---------------------------------------------------------------- settings & job list
@@ -193,7 +211,7 @@ ipcMain.handle("ftv:remove", (_, { id, deleteFile }) => {
 ipcMain.handle("ftv:show", (_, file) => { if (fs.existsSync(file)) shell.showItemInFolder(file); else shell.openPath(cfg.folder); return true; });
 ipcMain.handle("ftv:open", (_, file) => shell.openPath(file || cfg.folder));
 
-app.whenReady().then(async () => {
+app.whenReady().then(async () => { try {
   loadCfg();
   // anything that was running when the app closed: recordings end, downloads can be resumed
   cfg.jobs.forEach((j) => { if (j.state === "recording") j.state = "done"; if (j.state === "downloading" || j.state === "queued") j.state = "paused"; });
@@ -209,7 +227,8 @@ app.whenReady().then(async () => {
     webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: false, backgroundThrottling: false },
   });
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: "deny" }; });
+  if (!port) throw new Error("FreeTV could not start its local server (ports 47811-47831 are busy).");
   win.loadURL("http://127.0.0.1:" + port + "/");
-});
+} catch (e) { const m = logErr("start", e); dialog.showErrorBox("FreeTV could not start", m); app.quit(); } });
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => { for (const r of running.values()) try { r.kill(); } catch (e) {} saveCfg(); });
