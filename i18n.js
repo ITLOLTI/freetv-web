@@ -46,6 +46,8 @@ const SQ = {
   "Show channel numbers": "Shfaq numrat e kanaleve", "Show programme info in the channel list": "Shfaq info programi në listë", "24-hour clock": "Ora 24-orëshe", "Start screen": "Ekrani i nisjes",
   "Remember last channel group": "Mbaj mend grupin e fundit", "Last screen used": "Ekrani i fundit", "Clear favourites": "Fshi të preferuarat", "Clear recently watched": "Fshi të shikuarat së fundi",
   "Clear continue watching": "Fshi vazhdo shikimin", "Reconnecting…": "Duke u rilidhur…", "movies": "filma", "series": "seriale", "Device default": "Sipas pajisjes",
+  "Video decoder": "Dekoderi i videos", "Mac video player (recommended)": "Luajtësi i Mac-ut (rekomandohet)", "JavaScript player (mpegts.js)": "Luajtësi JavaScript (mpegts.js)",
+  "The Mac video player decodes in hardware and is the smoothest. Try the other one if a channel misbehaves.": "Luajtësi i Mac-ut dekodon me harduer dhe është më i rrjedhshmi. Provo tjetrin nëse një kanal nuk punon mirë.",
   "Fullscreen": "Ekran i plotë", "Picture in picture": "Foto në foto", "Groups": "Grupet", "Recent": "Të fundit", "Detected": "U gjetën",
 };
 let LANG = (() => { try { return JSON.parse(localStorage.getItem("ftv.lang")) || "en"; } catch (e) { return "en"; } })();

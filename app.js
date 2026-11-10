@@ -724,7 +724,8 @@ let engineSeq = 0;
 class Engine {
   constructor(video) { this.v = video; this.hls = null; this.ts = null; this.ff = null; this.sid = "b" + (++engineSeq); }
   destroy() {
-    clearTimeout(this.infoT);
+    clearTimeout(this.infoT); clearTimeout(this.noPicT);
+    if (this._offErr) { this._offErr(); this._offErr = null; }
     if (this.hls) { this.hls.destroy(); this.hls = null; } if (this.ts) { try { this.ts.destroy(); } catch (e) {} this.ts = null; }
     this.v.removeAttribute("src"); try { this.v.load(); } catch (e) {}
   }
@@ -744,18 +745,32 @@ class Engine {
     let q = "/play?sid=" + this.sid + "&u=" + encodeURIComponent(f.url) + "&mode=" + f.mode + (f.live ? "&live=1" : "") + (f.offset ? "&ss=" + Math.floor(f.offset) : "") + (f.aIdx != null ? "&a=" + f.aIdx : "");
     if (f.headers && Object.keys(f.headers).length) q += "&h=" + b64url(JSON.stringify(f.headers));
     const v = this.v;
-    if (!(window.mpegts && mpegts.getFeatureList().mseLivePlayback)) { this.onerr && this.onerr("player library missing – check the internet connection"); return; }
-    this.ts = mpegts.createPlayer({ type: "mpegts", isLive: true, url: location.origin + q },
-      { enableWorker: true, lazyLoad: false, enableStashBuffer: !f.live, stashInitialSize: f.live ? 128 * 1024 : 1024 * 1024, liveBufferLatencyChasing: !!f.live,
-        liveBufferLatencyMaxLatency: [3, 6, 14][cfg("buffer")], liveBufferLatencyMinRemain: [0.8, 1.5, 4][cfg("buffer")], autoCleanupSourceBuffer: true, autoCleanupMaxBackwardDuration: 60, autoCleanupMinBackwardDuration: 30 });
     const fail = (why) => {
       // picture format the player can't show (e.g. MPEG-2) → let ffmpeg convert the picture too
       if (f.mode === "copy" && !f.retried) { this.ffPlay({ ...f, mode: "transcode", retried: true, offset: this.time() || f.offset }); return; }
       this.onerr && this.onerr(f.err || why);
     };
+    const jsEngine = cfg("macEngine") === 1 && window.mpegts && mpegts.getFeatureList().mseLivePlayback;
+    if (!jsEngine) {
+      // Mac's own video player on a fragmented-MP4 stream – smooth, hardware decoded, no JavaScript demuxing
+      const onErr = () => { if (this.ff === f) fail("the picture format isn't supported (" + (v.error ? v.error.code : "?") + ")"); };
+      v.addEventListener("error", onErr, { once: true });
+      this._offErr = () => v.removeEventListener("error", onErr);
+      v.src = location.origin + q + "&fmt=mp4";
+      v.play().catch(() => {});
+      this.pollInfo(f, fail);
+      return;
+    }
+    this.ts = mpegts.createPlayer({ type: "mpegts", isLive: true, url: location.origin + q + "&fmt=ts" },
+      { enableWorker: true, lazyLoad: false, enableStashBuffer: !f.live, stashInitialSize: f.live ? 128 * 1024 : 1024 * 1024, liveBufferLatencyChasing: !!f.live,
+        liveBufferLatencyMaxLatency: [3, 6, 14][cfg("buffer")], liveBufferLatencyMinRemain: [0.8, 1.5, 4][cfg("buffer")], autoCleanupSourceBuffer: true, autoCleanupMaxBackwardDuration: 60, autoCleanupMinBackwardDuration: 30 });
     this.ts.on(mpegts.Events.ERROR, (t, d, info) => fail(d || t));
     this.ts.attachMediaElement(v); this.ts.load();
     v.play().catch(() => {});
+    this.pollInfo(f, fail);
+  }
+  pollInfo(f, fail) {
+    const v = this.v;
     let tries = 0;
     const poll = async () => {
       if (this.ff !== f) return;
@@ -769,7 +784,16 @@ class Engine {
     };
     this.infoT = setTimeout(poll, 800);
     // nothing decoded after a while although data arrives → try converting the picture
-    setTimeout(() => { if (this.ff === f && f.mode === "copy" && !f.retried && v.readyState < 2 && !f.err) fail("no picture"); }, 9000);
+    // sound plays but no picture (e.g. MPEG-2 the Mac player can't decode) → convert the picture
+    let checks = 0;
+    const noPic = () => {
+      if (this.ff !== f || f.mode !== "copy" || f.retried) return;
+      const hasVideo = !!f.video || checks >= 4;
+      if (v.videoWidth === 0 && hasVideo && (v.currentTime > 0.5 || v.readyState < 2)) { fail("no picture"); return; }
+      if (v.videoWidth > 0 || ++checks > 6) return;
+      this.noPicT = setTimeout(noPic, 1500);
+    };
+    this.noPicT = setTimeout(noPic, 2500);
   }
   load(rawUrl, { live, headers, startAt, local } = {}) {
     this.destroy(); this.ff = null;
@@ -894,7 +918,7 @@ function wireVideo(b) {
     }, 12000);
   });
   v.addEventListener("playing", () => { b.heals = 0; });
-  v.addEventListener("error", () => { if (!b.eng.hls && !b.eng.ts) msg(b, tr("Couldn't load") + (isIOS ? " – iPhone can't play this format" : "")); });
+  v.addEventListener("error", () => { if (!b.eng.hls && !b.eng.ts && !b.eng.ff) msg(b, tr("Couldn't load") + (isIOS ? " – iPhone can't play this format" : "")); });
   v.addEventListener("timeupdate", () => {
     if (P.boxes.indexOf(b) !== P.sel) return;
     const it = b.item; if (!it || it.kind === "live") return;
@@ -1029,7 +1053,7 @@ function optionsSheet() {
     recstop: () => { const rj = JOBS.find((j) => j.type === "record" && j.state === "recording" && j.name === it.title); if (rj) DESK.stop(rj.id); },
     prev: () => zap(-1), next: () => zap(1), b10: () => eng.seek(eng.time() - 10), f10: () => eng.seek(eng.time() + 10), fav: () => { toggleFav(it.key); drawUi(); }, multi: toggleMulti,
     reload: () => startItem(it, P.sel), pip: () => { try { b.video.requestPictureInPicture ? b.video.requestPictureInPicture() : b.video.webkitSetPresentationMode("picture-in-picture"); } catch (e) { toast("Not supported here"); } },
-    info: () => { $("#sinfo").textContent = (b.video.videoWidth ? b.video.videoWidth + "×" + b.video.videoHeight + " · " : "") + (eng.ff ? "ffmpeg · " + (eng.ff.mode === "copy" ? "picture passed through" : "picture converted") + (eng.ff.video ? " · " + eng.ff.video : "") : eng.hls ? "HLS (hls.js)" : eng.ts ? "MPEG-TS (mpegts.js)" : "native") + (relay().url ? " · relay" : ""); return true; } };
+    info: () => { $("#sinfo").textContent = (b.video.videoWidth ? b.video.videoWidth + "×" + b.video.videoHeight + " · " : "") + (eng.ff ? "ffmpeg → " + (eng.ts ? "JavaScript player" : "Mac video player") + " · " + (eng.ff.mode === "copy" ? "picture passed through" : "picture converted") + (eng.ff.video ? " · " + eng.ff.video : "") : eng.hls ? "HLS (hls.js)" : eng.ts ? "MPEG-TS (mpegts.js)" : "native") + (relay().url ? " · relay" : ""); return true; } };
   $$("[data-o]").forEach((x) => x.onclick = () => { const keep = act[x.dataset.o](); if (!keep) closeSheet(); });
   $$("#asp button").forEach((x) => x.onclick = () => { const i = ["fit", "fill", "stretch"].indexOf(x.dataset.a); store.set("set.aspect", i); P.boxes.forEach((bb) => bb.video.className = OPT.aspectCls[i]); optionsSheet(); });
   $$("[data-au]").forEach((x) => x.onclick = () => { eng.setAudio(+x.dataset.au); closeSheet(); });

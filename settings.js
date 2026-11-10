@@ -19,7 +19,7 @@ const LANG3 = { sq: ["sq", "sqi", "alb"], en: ["en", "eng"], de: ["de", "deu", "
 /** Every setting: default value. Choices are stored as an index, toggles as true/false, sliders as 0–100. */
 const SETTINGS_DEFAULTS = {
   refresh: 1, aspect: 0, audioLang: 1, autoPlayLast: false, invertZap: false, zapOsd: true, osd: 1, resumeVod: true, autoReconnect: true, customUa: "",
-  quality: 0, buffer: 1, liveFmt: 0, convert: 0, selfHeal: true,
+  quality: 0, buffer: 1, liveFmt: 0, convert: 0, macEngine: 0, selfHeal: true,
   subsOn: true, subsLang: 1, subsSize: 1, subsColor: 0, subsBg: 1, subsEdge: 1, subsPos: 1,
   theme: 0, accent: 0, uiScale: 2, textScale: 1,
   glassOn: true, gIntensity: 10, gTransparency: 45, gBlur: 30, gDensity: 25, gReflection: 35, gMotion: 35,
@@ -34,6 +34,7 @@ const OPT = {
   buffer: ["Low latency – fastest zapping", "Balanced (recommended)", "Large – 4K & unstable connections"],
   liveFmt: ["HLS (.m3u8)", "MPEG-TS (.ts)"],
   convert: ["Automatic – only when needed (recommended)", "Always convert the picture", "Never convert"],
+  macEngine: ["Mac video player (recommended)", "JavaScript player (mpegts.js)"],
   subsSize: ["Small", "Normal", "Large", "Extra large"], subsSizeEm: [0.85, 1, 1.25, 1.55],
   subsColor: ["White", "Yellow", "Green", "Cyan"], subsColorV: ["#FFFFFF", "#FFE14D", "#7CFC7C", "#66E0FF"],
   subsBg: ["None", "Semi-transparent", "Solid black"], subsBgV: ["transparent", "rgba(0,0,0,.6)", "#000"],
@@ -118,6 +119,7 @@ function renderSettings(v) {
   } else if (setCat === "video") {
     body = list(rowC("quality", "Maximum video quality", OPT.quality, "For streams with several qualities") + rowC("buffer", "Buffer size", OPT.buffer, "Large buffers smooth out 4K and weak connections; low latency switches channels faster.") +
       rowC("liveFmt", "Xtream live stream format", OPT.liveFmt, "If a channel stutters or freezes, try the other format (reload the playlist afterwards)") +
+      (DESK ? rowC("macEngine", "Video decoder", OPT.macEngine, "The Mac video player decodes in hardware and is the smoothest. Try the other one if a channel misbehaves.") : "") +
       (DESK ? rowC("convert", "Picture conversion (ffmpeg)", OPT.convert, "The Mac passes the picture through untouched and converts only the sound. Channels in old formats (MPEG-2) are converted automatically.") : "") +
       rowT("selfHeal", "Self-healing playback", "Detects frozen pictures and dead connections and restarts the stream"));
   } else if (setCat === "subtitles") {
@@ -144,7 +146,7 @@ function renderSettings(v) {
     const nf = [...favs()].length, nr = store.get("recent." + S.activeId, []).length, np = Object.keys(positions()).length;
     body = list(rowA("cfav", "Clear favourites", null, String(nf)) + rowA("crec", "Clear recently watched", null, String(nr)) + rowA("cpos", "Clear continue watching", null, String(np)) +
       rowA("clear", "Clear saved data", "Playlists stay; channel lists and TV guide are downloaded again")) +
-      '<div class="small dim" style="text-align:center;margin:24px">FreeTV ' + (DESK ? "for Mac" : "web") + " 1.1</div>";
+      '<div class="small dim" style="text-align:center;margin:24px">FreeTV ' + (DESK ? "for Mac" : "web") + " 1.2</div>";
   }
   v.innerHTML = "<h1>" + tr("Settings") + '</h1><div class="setlayout"><div class="setcats">' + SET_CATS.map(([k, l]) => '<button class="' + (k === setCat ? "on" : "") + '" data-cat="' + k + '">' + tr(l) + "</button>").join("") +
     '</div><div class="setbody">' + body + "</div></div>";

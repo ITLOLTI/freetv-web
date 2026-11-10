@@ -193,8 +193,12 @@ async function play(req, res, u) {
     args.push("-vf", "yadif=deint=interlaced");
   } else args.push("-c:v", "copy");
   args.push("-c:a", "aac", "-b:a", "192k", "-ac", "2", "-ar", "48000");
-  if (live) args.push("-max_muxing_queue_size", "1024");
-  args.push("-f", "mpegts", "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0", "pipe:1");
+  const fmt = u.searchParams.get("fmt") || "mp4";
+  args.push("-max_muxing_queue_size", "2048", "-avoid_negative_ts", "make_zero");
+  // mp4: fragmented MP4 that the Mac's own video player plays directly (smoothest).
+  // ts:  MPEG-TS for the JavaScript player (fallback engine).
+  if (fmt === "ts") args.push("-f", "mpegts", "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0", "pipe:1");
+  else args.push("-f", "mp4", "-movflags", "frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "2000000", "pipe:1");
   const proc = spawn(ffmpegPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
   const s = { proc, duration: 0, video: "", audios: [], error: "", started: Date.now() };
   sessions.set(sid, s);
@@ -210,7 +214,7 @@ async function play(req, res, u) {
     }
   });
   proc.on("close", (code) => { if (code && !res.headersSent) { s.error = err.split("\n").filter((l) => /error|invalid|not|fail|refused|forbidden|denied/i.test(l)).slice(-3).join(" ") || "ffmpeg " + code; } });
-  res.writeHead(200, { "Content-Type": "video/mp2t", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
+  res.writeHead(200, { "Content-Type": fmt === "ts" ? "video/mp2t" : "video/mp4", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
   proc.stdout.pipe(res);
   proc.on("close", () => { if (!s.error && err && proc.exitCode) s.error = err.split("\n").slice(-3).join(" "); res.end(); });
   res.on("close", () => { if (sessions.get(sid) === s) { try { proc.kill("SIGKILL"); } catch (e) {} } });
