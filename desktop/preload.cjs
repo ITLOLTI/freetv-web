@@ -11,5 +11,7 @@ contextBridge.exposeInMainWorld("ftvDesktop", {
   remove: (id, deleteFile) => ipcRenderer.invoke("ftv:remove", { id, deleteFile }),
   show: (file) => ipcRenderer.invoke("ftv:show", file),
   open: (file) => ipcRenderer.invoke("ftv:open", file),
+  sn: (ch, arg) => ipcRenderer.invoke("sn:" + ch, arg),
+  onSn: (cb) => ipcRenderer.on("sn:event", (_, e) => cb(e)),
   onJobs: (cb) => ipcRenderer.on("ftv:jobs", (_, jobs) => cb(jobs)),
 });

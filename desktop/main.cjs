@@ -3,7 +3,7 @@
 //  • recording of live channels (ffmpeg, stream copy – no quality loss, little CPU),
 //  • downloads of movies and episodes (resumable),
 //  • a destination folder you choose.
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, session } = require("electron");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -300,6 +300,10 @@ ipcMain.handle("ftv:remove", (_, { id, deleteFile }) => {
 ipcMain.handle("ftv:show", (_, file) => { if (fs.existsSync(file)) shell.showItemInFolder(file); else shell.openPath(cfg.folder); return true; });
 ipcMain.handle("ftv:open", (_, file) => shell.openPath(file || cfg.folder));
 
+// ---------------------------------------------------------------- Web Sniffer (separate module, see sniffer.cjs)
+let sniffer = null;
+try { sniffer = require("./sniffer.cjs").init({ app, ipcMain, dialog, shell, BrowserWindow, session, getWin: () => win, ffmpegPath, getFolder: () => cfg.folder }); } catch (e) { logErr("sniffer", e); }
+
 app.whenReady().then(async () => { try {
   loadCfg();
   // anything that was running when the app closed: recordings end, downloads can be resumed
@@ -320,4 +324,4 @@ app.whenReady().then(async () => { try {
   win.loadURL("http://127.0.0.1:" + port + "/");
 } catch (e) { const m = logErr("start", e); dialog.showErrorBox("FreeTV could not start", m); app.quit(); } });
 app.on("window-all-closed", () => app.quit());
-app.on("before-quit", () => { for (const r of running.values()) try { r.kill(); } catch (e) {} for (const s of sessions.values()) try { s.proc.kill("SIGKILL"); } catch (e) {} saveCfg(); });
+app.on("before-quit", () => { if (sniffer) sniffer.stopAll(); for (const r of running.values()) try { r.kill(); } catch (e) {} for (const s of sessions.values()) try { s.proc.kill("SIGKILL"); } catch (e) {} saveCfg(); });

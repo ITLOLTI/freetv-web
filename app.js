@@ -46,6 +46,7 @@ const I = {
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>',
+  sniff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.8 2.6 15.2 0 18M12 3c-2.6 2.8-2.6 15.2 0 18"/></svg>',
   lib: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h4v16H4zM10 4h4v16h-4z"/><path d="m16 5 3.8-1 3 15.5-3.8 1z"/></svg>',
   rec: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7" fill="#FF3B30"/></svg>',
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>',
@@ -431,7 +432,7 @@ function updateEpgRow(c) {
 
 // ============================================================ rendering
 const TABS = [["home", "Home", I.home], ["live", "Live TV", I.live], ["movies", "Movies", I.movie], ["series", "Series", I.series], ["search", "Search", I.search],
-  ...(DESK ? [["library", "Library", I.lib]] : []), ["settings", "Settings", I.settings]];
+  ...(DESK ? [["sniffer", "Web Sniffer", I.sniff], ["library", "Library", I.lib]] : []), ["settings", "Settings", I.settings]];
 function renderNav() {
   const b = TABS.map(([k, l, ic]) => '<button data-tab="' + k + '" class="' + (S.tab === k ? "on" : "") + '">' + ic + "<span>" + tr(l) + "</span></button>").join("");
   $("#tabs").innerHTML = b;
@@ -444,12 +445,12 @@ function render() {
   const v = $("#view");
   if (S.detail) return renderDetail(v);
   const p = active();
-  if (!p && S.tab !== "settings" && S.tab !== "library") { v.innerHTML = '<div class="empty"><img src="logo.png" style="width:180px"><h2>' + tr("No playlist yet") + "</h2><p>" + tr("Add your M3U, Xtream or MAC portal to start watching.") +
+  if (!p && S.tab !== "settings" && S.tab !== "library" && S.tab !== "sniffer") { v.innerHTML = '<div class="empty"><img src="logo.png" style="width:180px"><h2>' + tr("No playlist yet") + "</h2><p>" + tr("Add your M3U, Xtream or MAC portal to start watching.") +
     '</p><button class="btn primary" id="addPl">' + tr("Add playlist") + "</button></div>"; $("#addPl").onclick = () => editPlaylist(); return; }
-  if (S.loading && S.tab !== "settings" && S.tab !== "library") { v.innerHTML = '<div class="empty"><div class="spinner"></div>' + esc(S.progress) + "</div>"; return; }
-  if (S.error && S.tab !== "settings" && S.tab !== "library") { v.innerHTML = '<div class="empty">' + esc(S.error) + '<br><br><button class="btn" id="retry">' + tr("Try again") + '</button> <button class="btn" id="toSet">' + tr("Settings") + "</button></div>";
+  if (S.loading && S.tab !== "settings" && S.tab !== "library" && S.tab !== "sniffer") { v.innerHTML = '<div class="empty"><div class="spinner"></div>' + esc(S.progress) + "</div>"; return; }
+  if (S.error && S.tab !== "settings" && S.tab !== "library" && S.tab !== "sniffer") { v.innerHTML = '<div class="empty">' + esc(S.error) + '<br><br><button class="btn" id="retry">' + tr("Try again") + '</button> <button class="btn" id="toSet">' + tr("Settings") + "</button></div>";
     $("#retry").onclick = () => loadActive(true); $("#toSet").onclick = () => go("settings"); return; }
-  ({ home: renderHome, live: renderLive, movies: (v) => renderVod(v, "movies"), series: (v) => renderVod(v, "series"), search: renderSearch, settings: renderSettings, library: renderLibrary }[S.tab] || renderHome)(v);
+  ({ home: renderHome, live: renderLive, movies: (v) => renderVod(v, "movies"), series: (v) => renderVod(v, "series"), search: renderSearch, settings: renderSettings, library: renderLibrary, sniffer: (v) => renderSniffer(v) }[S.tab] || renderHome)(v);
 }
 
 function logoHtml(src, name, cover) {

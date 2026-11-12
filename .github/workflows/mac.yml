@@ -35,6 +35,13 @@ jobs:
           sed -i '' -e 's#https://cdn.jsdelivr.net/npm/hls.js@[^"]*#hls.min.js#' -e 's#https://cdn.jsdelivr.net/npm/mpegts.js@[^"]*#mpegts.js#' app/index.html
           grep -n "script src" app/index.html
 
+      - name: Add the media extractor (yt-dlp) for the Web Sniffer
+        run: |
+          mkdir -p desktop/bin
+          curl -fL --retry 3 -o desktop/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
+          chmod +x desktop/bin/yt-dlp
+          ls -la desktop/bin
+
       - name: Build the .dmg
         working-directory: desktop
         env:

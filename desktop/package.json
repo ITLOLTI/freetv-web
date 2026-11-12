@@ -1,8 +1,8 @@
 {
   "name": "freetv-mac",
   "productName": "FreeTV",
-  "version": "1.2.0",
-  "description": "FreeTV for Mac \u2013 IPTV player with recording and downloads",
+  "version": "1.3.0",
+  "description": "FreeTV for Mac – IPTV player with recording, downloads, web media sniffer and converter",
   "main": "main.cjs",
   "author": "ITLOLTI",
   "license": "UNLICENSED",
@@ -25,6 +25,8 @@
     "files": [
       "main.cjs",
       "preload.cjs",
+      "sniffer.cjs",
+      "bin/**",
       "app/**",
       "node_modules/ffmpeg-static/**",
       "package.json"

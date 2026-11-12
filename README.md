@@ -23,6 +23,16 @@ The same app as a real Mac app – **no relay needed**, plus:
 **First launch:** the app isn't from the App Store, so macOS asks once. Right-click FreeTV in Applications → **Open** → **Open**. If macOS says the app is *damaged*, open Terminal and run:
 `xattr -cr /Applications/FreeTV.app` – then open it again.
 
+### Web Sniffer (Mac app, since 1.3.0)
+
+A separate screen next to the IPTV tabs:
+
+- **Discover** – paste a page or video link, press *Analyze*. FreeTV lists the media it finds (title, thumbnail, length, qualities, size). Three engines: a site extractor (yt-dlp), FreeTV's own page scan (video tags, JSON-LD, HLS/DASH playlists, embedded players) and an optional *Deep scan* that loads the page in a hidden window and watches what it loads.
+- **Downloads** – several downloads at once, several connections per file, pause / resume, automatic retry, speed and time left, duplicate warning, history. Files go to `FreeTV/Web`.
+- **Converter** – MP4, MOV, MKV, AVI, WebM, MP3, M4A, AAC, WAV, FLAC with resolution, codecs, bitrate, frame rate and quality; several files in a row. Files go to `FreeTV/Converted`.
+
+DRM-protected streams and videos that need a sign-in are shown as protected and are **not** downloaded – FreeTV does not bypass DRM, logins or other access controls. Live streams can be previewed only. Only save media you have the right to download.
+
 ## Open it
 
 `https://itlolti.github.io/freetv-web/`
