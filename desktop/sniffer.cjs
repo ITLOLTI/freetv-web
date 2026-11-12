@@ -118,6 +118,17 @@ exports.init = function init(ctx) {
   const unesc = (s) => s.replace(/\\\//g, "/").replace(/\\u0026/gi, "&").replace(/&amp;/g, "&");
   const DRM_RE = /SAMPLE-AES|streamingkeydelivery|widevine|playready|urn:uuid:edef8ba9|urn:uuid:9a04f079|com\.apple\.fps/i;
 
+  // many players ship their setup as a "packed" script (eval(function(p,a,c,k,e,d)…)); unpack it so the stream link inside can be read
+  function unpackScripts(html) {
+    let extra = "";
+    const num = (w, base) => { if (base <= 36) return parseInt(w, base); let n = 0; for (const ch of w) { const c = ch.charCodeAt(0); n = n * base + (c >= 97 ? c - 87 : c >= 65 ? c - 29 : c - 48); } return n; };
+    for (const m of html.matchAll(/\}\('((?:[^'\\]|\\.)*)',\s*(\d+),\s*(\d+),\s*'((?:[^'\\]|\\.)*)'\.split\('\|'\)/g)) {
+      try { const base = +m[2], words = m[4].split("|"); if (base < 2 || base > 62) continue;
+        extra += "\n" + m[1].replace(/\\'/g, "'").replace(/\b\w+\b/g, (w) => { const i = num(w, base); return words[i] || w; }); } catch (e) {}
+    }
+    for (const m of html.matchAll(/["']((?:aHR0c|Ly9)[A-Za-z0-9+/=]{16,})["']/g)) { try { extra += "\n\"" + Buffer.from(m[1], "base64").toString("utf8") + "\""; } catch (e) {} }
+    return extra;
+  }
   async function inspectHls(url, headers) {
     const out = { variants: [], duration: 0, live: false, drm: false };
     const { text } = await fetchText(url, headers, 2e6, 12000);
@@ -140,13 +151,13 @@ exports.init = function init(ctx) {
   }
   async function itemFromMedia(url, meta = {}) {
     const ext = extOf(url) || meta.ext || "";
-    const headers = meta.pageUrl && meta.pageUrl !== url ? { Referer: meta.pageUrl } : null;
+    const headers = meta.headers || (meta.pageUrl && meta.pageUrl !== url ? { Referer: meta.pageUrl } : null);
     const base = { id: "m" + Buffer.from(url).toString("base64").slice(-24), source: meta.source || "page", site: (() => { try { return new URL(meta.pageUrl || url).hostname.replace(/^www\./, ""); } catch (e) { return ""; } })(),
       title: meta.title || decodeURIComponent(url.split("/").pop().split("?")[0]) || "Video", description: meta.description || "", thumbnail: meta.thumbnail || "", duration: meta.duration || 0,
       pageUrl: meta.pageUrl || url, formats: [], previewUrl: url, previewHeaders: headers, drm: false, live: false };
     if (ext === "m3u8") {
       const h = await inspectHls(url, headers);
-      base.drm = h.drm; base.live = h.live; base.duration = base.duration || Math.round(h.duration);
+      base.drm = h.drm; base.live = h.live; base.variants = h.variants.map((v) => v.url); base.duration = base.duration || Math.round(h.duration);
       if (!h.drm && !h.live) {
         const vs = h.variants.length ? h.variants : [{ height: 0, bandwidth: 0, url }];
         const seen = new Set();
@@ -173,12 +184,12 @@ exports.init = function init(ctx) {
     }
     return base;
   }
-  async function scanPage(url, depth = 1, seen = new Set()) {
+  async function scanPage(url, depth = 2, seen = new Set(), referer = "") {
     if (seen.has(url)) return []; seen.add(url);
-    let page; try { page = await fetchText(url); } catch (e) { return []; }
+    let page; try { page = await fetchText(url, referer ? { Referer: referer } : null); } catch (e) { return []; }
     if (!page.text) return [await itemFromMedia(page.url, { size: page.size, pageUrl: url })].filter(Boolean);
     if (page.text.trimStart().startsWith("#EXTM3U")) return [await itemFromMedia(url, { ext: "m3u8", pageUrl: url })].filter(Boolean);
-    const html = page.text, base = page.url;
+    const base = page.url, html = page.text + unpackScripts(page.text);
     const meta = (p) => { const m = new RegExp(`<meta[^>]+(?:property|name)=["']${p}["'][^>]*content=["']([^"']+)["']`, "i").exec(html) || new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]*(?:property|name)=["']${p}["']`, "i").exec(html); return m ? unesc(m[1]) : ""; };
     const abs = (u) => { if (!u) return ""; try { return new URL(unesc(u), base).toString(); } catch (e) { return ""; } };
     const pageTitle = meta("og:title") || ((/<title[^>]*>([^<]+)</i.exec(html) || [])[1] || "").trim() || new URL(base).hostname;
@@ -196,7 +207,7 @@ exports.init = function init(ctx) {
     for (const m of html.matchAll(/<(?:video|audio)\b([^>]*)>/gi)) { const s = /\bsrc=["']([^"']+)["']/i.exec(m[1]), po = /\bposter=["']([^"']+)["']/i.exec(m[1]); if (s) addU(s[1], { thumbnail: po && abs(po[1]), force: /^(?!blob:)/.test(s[1]) && /\.(mp4|webm|m3u8|mp3)/i.test(s[1]) }); }
     for (const m of html.matchAll(/<source\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi)) addU(m[1]);
     for (const m of unesc(html).matchAll(/https?:\/\/[^\s"'<>\\)]+?\.(?:m3u8|mpd|mp4|webm|mov|m4v|mkv|mp3|m4a|flac|wav|ogg)(?:\?[^\s"'<>\\)]*)?/gi)) addU(m[0]);
-    for (const m of html.matchAll(/["'](\/[^"'\s<>]+?\.(?:m3u8|mpd|mp4|webm|m4v|mp3)(?:\?[^"'\s<>]*)?)["']/gi)) addU(m[1]);
+    for (const m of unesc(html).matchAll(/["'](\/[^"'\s<>]+?\.(?:m3u8|mpd|mp4|webm|m4v|mp3)(?:\?[^"'\s<>]*)?)["']/gi)) addU(m[1]);
     const items = [];
     const list = [...found.entries()].filter(([u]) => !/\.(ts|m4s)(\?|$)/i.test(u)).slice(0, 40);
     let k = 0;
@@ -207,7 +218,7 @@ exports.init = function init(ctx) {
     }));
     if (depth > 0) {
       const frames = [...html.matchAll(/<iframe\b[^>]*\bsrc=["']([^"']+)["']/gi)].map((m) => abs(m[1])).filter((u) => /^https?:/.test(u)).slice(0, 6);
-      for (const f of frames) { step("Looking inside an embedded player…"); for (const it of await scanPage(f, depth - 1, seen)) { if (!it.thumbnail) it.thumbnail = pageThumb; if (/^[\w.-]+$/.test(it.title) || !it.title) it.title = pageTitle; it.pageUrl = f; items.push(it); } }
+      for (const f of frames) { step("Looking inside an embedded player…"); for (const it of await scanPage(f, depth - 1, seen, base)) { if (!it.thumbnail) it.thumbnail = pageThumb; if (/^[\w.-]+$/.test(it.title) || !it.title) it.title = pageTitle; it.pageUrl = f; items.push(it); } }
     }
     return items.sort((a, b) => (a.order || 0) - (b.order || 0));
   }
@@ -216,24 +227,39 @@ exports.init = function init(ctx) {
   function deepScan(url) {
     return new Promise((resolve) => {
       const { BrowserWindow, session } = ctx;
-      if (!BrowserWindow || !session) return resolve({ urls: [], title: "" });
-      const hits = new Map(); let w;
-      const ses = session.fromPartition("sniff-" + Date.now());
-      const finish = () => { let title = ""; try { title = w.webContents.getTitle(); } catch (e) {} try { w.destroy(); } catch (e) {} resolve({ urls: [...hits.keys()], title }); };
+      if (!BrowserWindow || !session) return resolve({ hits: [], title: "" });
+      const hits = new Map(), sent = new Map(); let w, done = false, early = 0;
+      // a private, empty browser profile that lives only for this scan: no cookies, no logins, nothing from the user's own browsers
+      const ses = session.fromPartition("sniff-" + Date.now() + Math.random());
+      const finish = () => { if (done) return; done = true; let title = ""; try { title = w.webContents.getTitle(); } catch (e) {} try { w.destroy(); } catch (e) {}
+        try { ses.clearStorageData(); ses.clearCache(); } catch (e) {}
+        resolve({ hits: [...hits.entries()].map(([u, h]) => ({ url: u, ...h })), title }); };
       try {
+        ses.webRequest.onBeforeSendHeaders((d, cb) => { try { const h = d.requestHeaders || {}; sent.set(d.url, { Referer: h.Referer || h.referer || "", Origin: h.Origin || h.origin || "" }); if (sent.size > 4000) sent.clear(); } catch (e) {} cb({}); });
         ses.webRequest.onHeadersReceived((d, cb) => {
-          try { const h = d.responseHeaders || {}; const ct = String((h["content-type"] || h["Content-Type"] || [""])[0]).toLowerCase(); const u = d.url;
-            if (!/\.(ts|m4s|jpg|png|gif|css|js|woff2?)(\?|$)/i.test(u) && (/mpegurl|dash\+xml/.test(ct) || /^(video|audio)\//.test(ct) && !/mp2t/.test(ct) || MEDIA_RE.test(u.split("#")[0]))) hits.set(u, ct); } catch (e) {}
+          try { const h = d.responseHeaders || {}; const ct = String((h["content-type"] || h["Content-Type"] || [""])[0]).toLowerCase(); const u = d.url, bare = u.split("#")[0].split("?")[0];
+            const playlist = /mpegurl|dash\+xml/.test(ct) || /\.(m3u8|mpd)$/i.test(bare);
+            const file = !/\.(ts|m4s|aac|jpe?g|png|gif|webp|svg|css|js|woff2?|ico|vtt|srt|json)$/i.test(bare) && (/^(video|audio)\//.test(ct) && !/mp2t/.test(ct) || /\.(mp4|webm|mov|m4v|mkv|mp3|m4a|flac)$/i.test(bare));
+            if ((playlist || file) && d.statusCode < 400 && !hits.has(u)) { const rq = sent.get(u) || {}; const hd = {}; if (rq.Referer) hd.Referer = rq.Referer; if (rq.Origin) hd.Origin = rq.Origin;
+              hits.set(u, { ext: playlist ? (/dash|\.mpd$/i.test(ct + bare) ? "mpd" : "m3u8") : "", headers: Object.keys(hd).length ? hd : null });
+              step("Found a stream – checking for more…"); if (!early) early = setTimeout(finish, playlist ? 3500 : 5000); }
+          } catch (e) {}
           cb({});
         });
-        w = new BrowserWindow({ show: false, width: 1280, height: 800, webPreferences: { session: ses, sandbox: true, contextIsolation: true, backgroundThrottling: false } });
+        w = new BrowserWindow({ show: false, width: 1280, height: 800, webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, autoplayPolicy: "no-user-gesture-required" } });
         w.webContents.setAudioMuted(true); w.webContents.setUserAgent(UA);
-        w.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-        const press = () => w.webContents.executeJavaScript(`(()=>{document.querySelectorAll('video,audio').forEach(v=>{try{v.muted=true;v.play()}catch(e){}});
-          for(const s of ['.vjs-big-play-button','.jw-icon-display','.plyr__control--overlaid','.ytp-large-play-button','[aria-label="Play" i]','button[title="Play" i]','.play-button','.btn-play']){const b=document.querySelector(s);if(b){try{b.click()}catch(e){}}}})()`, true).catch(() => {});
-        w.webContents.on("did-finish-load", () => { setTimeout(press, 800); setTimeout(press, 3500); });
+        w.webContents.setWindowOpenHandler(() => ({ action: "deny" }));                       // no pop-ups
+        let loaded = false; w.webContents.on("will-navigate", (e) => { if (loaded) e.preventDefault(); });   // no redirects to ad pages after the page is open
+        ses.setPermissionRequestHandler((_, __, cb) => cb(false)); w.webContents.session.on("will-download", (e) => e.preventDefault());
+        const PRESS = `(()=>{try{document.querySelectorAll('video,audio').forEach(v=>{try{v.muted=true;const p=v.play();p&&p.catch(()=>{})}catch(e){}});
+          for(const s of ['.vjs-big-play-button','.jw-icon-display','.jw-display-icon-container','.plyr__control--overlaid','.ytp-large-play-button','[aria-label="Play" i]','button[title="Play" i]','.play-button','.btn-play','#play','.play','[class*="play" i]']){const b=document.querySelector(s);if(b){try{b.click()}catch(e){}}}
+          try{if(window.jwplayer){const p=jwplayer();p&&p.setMute&&p.setMute(true);p&&p.play&&p.play()}}catch(e){}
+          const v=document.querySelector('video');if(v){const r=v.getBoundingClientRect();const el=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);el&&el.click&&el.click()}}catch(e){}})()`;
+        const press = () => { if (done) return; try { for (const f of w.webContents.mainFrame.framesInSubtree) f.executeJavaScript(PRESS, true).catch(() => {}); } catch (e) {} };
+        w.webContents.on("did-finish-load", () => { loaded = true; [700, 2500, 5000, 8000].forEach((t) => setTimeout(press, t)); });
+        w.webContents.on("did-fail-load", (_, code, __, ___, main) => { if (main && code !== -3) setTimeout(finish, 300); });
         w.loadURL(url).catch(() => {});
-        setTimeout(finish, 11000);
+        setTimeout(finish, 16000);
       } catch (e) { finish(); }
     });
   }
@@ -256,9 +282,12 @@ exports.init = function init(ctx) {
     if (!items.length || deep) {
       step("Deep scan – loading the page like a browser…");
       const d = await deepScan(url); const have = new Set(items.flatMap((i) => [i.previewUrl, ...i.formats.map((f) => f.url)]));
-      for (const u of d.urls.slice(0, 20)) { if (have.has(u)) continue; step("Checking what the page loaded…");
-        try { const it = await itemFromMedia(u, { pageUrl: url, title: d.title || undefined, source: "network", ext: extOf(u) || (/m3u8/.test(u) ? "m3u8" : "") }); if (it) items.push(it); } catch (e) {} }
+      for (const h of d.hits.slice(0, 20)) { if (have.has(h.url)) continue; step("Checking what the page loaded…");
+        try { const it = await itemFromMedia(h.url, { pageUrl: url, title: d.title || undefined, source: "network", ext: h.ext || extOf(h.url), headers: h.headers }); if (it) items.push(it); } catch (e) {} }
     }
+    // a master playlist and its own quality variants are one video, not several
+    const inner = new Set(items.flatMap((i) => i.variants || []));
+    items = items.filter((i) => !(i.source !== "extractor" && inner.has(i.previewUrl))); items.forEach((i) => delete i.variants);
     if (items.some((i) => i.drm)) notes.push("Some media on this page is DRM-protected and can't be downloaded.");
     if (!items.length && !notes.length) notes.push("No downloadable media was found on this page.");
     return { url, items, notes: [...new Set(notes)], extractor: !!ytPath() };

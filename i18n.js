@@ -1,5 +1,6 @@
 // English → Albanian (Shqip). Missing entries fall back to English.
 const SQ = {
+  "Found a stream – checking for more…": "U gjet një transmetim – duke kërkuar të tjera…",
   "Web Sniffer": "Web Sniffer",
   "Discover": "Zbulo",
   "Converter": "Konvertuesi",
