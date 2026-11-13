@@ -228,24 +228,15 @@ exports.init = function init(ctx) {
     return new Promise((resolve) => {
       const { BrowserWindow, session } = ctx;
       if (!BrowserWindow || !session) return resolve({ hits: [], title: "" });
-      const hits = new Map(), sent = new Map(); let w, done = false, early = 0;
+      const hits = new Map(); let w, done = false, early = 0;
       // a private, empty browser profile that lives only for this scan: no cookies, no logins, nothing from the user's own browsers
       const ses = session.fromPartition("sniff-" + Date.now() + Math.random());
       const finish = () => { if (done) return; done = true; let title = ""; try { title = w.webContents.getTitle(); } catch (e) {} try { w.destroy(); } catch (e) {}
         try { ses.clearStorageData(); ses.clearCache(); } catch (e) {}
         resolve({ hits: [...hits.entries()].map(([u, h]) => ({ url: u, ...h })), title }); };
       try {
-        ses.webRequest.onBeforeSendHeaders((d, cb) => { try { const h = d.requestHeaders || {}; sent.set(d.url, { Referer: h.Referer || h.referer || "", Origin: h.Origin || h.origin || "" }); if (sent.size > 4000) sent.clear(); } catch (e) {} cb({}); });
-        ses.webRequest.onHeadersReceived((d, cb) => {
-          try { const h = d.responseHeaders || {}; const ct = String((h["content-type"] || h["Content-Type"] || [""])[0]).toLowerCase(); const u = d.url, bare = u.split("#")[0].split("?")[0];
-            const playlist = /mpegurl|dash\+xml/.test(ct) || /\.(m3u8|mpd)$/i.test(bare);
-            const file = !/\.(ts|m4s|aac|jpe?g|png|gif|webp|svg|css|js|woff2?|ico|vtt|srt|json)$/i.test(bare) && (/^(video|audio)\//.test(ct) && !/mp2t/.test(ct) || /\.(mp4|webm|mov|m4v|mkv|mp3|m4a|flac)$/i.test(bare));
-            if ((playlist || file) && d.statusCode < 400 && !hits.has(u)) { const rq = sent.get(u) || {}; const hd = {}; if (rq.Referer) hd.Referer = rq.Referer; if (rq.Origin) hd.Origin = rq.Origin;
-              hits.set(u, { ext: playlist ? (/dash|\.mpd$/i.test(ct + bare) ? "mpd" : "m3u8") : "", headers: Object.keys(hd).length ? hd : null });
-              step("Found a stream – checking for more…"); if (!early) early = setTimeout(finish, playlist ? 3500 : 5000); }
-          } catch (e) {}
-          cb({});
-        });
+        watchSession(ses, (u, h) => { if (hits.has(u)) return; hits.set(u, { ext: h.ext, headers: h.headers });
+          step("Found a stream – checking for more…"); if (!early) early = setTimeout(finish, h.playlist ? 3500 : 5000); });
         w = new BrowserWindow({ show: false, width: 1280, height: 800, webPreferences: { session: ses, sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, autoplayPolicy: "no-user-gesture-required" } });
         w.webContents.setAudioMuted(true); w.webContents.setUserAgent(UA);
         w.webContents.setWindowOpenHandler(() => ({ action: "deny" }));                       // no pop-ups
@@ -264,6 +255,60 @@ exports.init = function init(ctx) {
     });
   }
 
+  // what counts as media in a page's network traffic (shared by the deep scan and the in-app browser)
+  function watchSession(ses, onHit) {
+    const sent = new Map();
+    ses.webRequest.onBeforeSendHeaders((d, cb) => { try { const h = d.requestHeaders || {}; sent.set(d.url, { Referer: h.Referer || h.referer || "", Origin: h.Origin || h.origin || "" }); if (sent.size > 4000) sent.clear(); } catch (e) {} cb({}); });
+    ses.webRequest.onHeadersReceived((d, cb) => {
+      try { const h = d.responseHeaders || {}; const ct = String((h["content-type"] || h["Content-Type"] || [""])[0]).toLowerCase(); const u = d.url, bare = u.split("#")[0].split("?")[0];
+        const playlist = /mpegurl|dash\+xml/.test(ct) || /\.(m3u8|mpd)$/i.test(bare);
+        const file = !/\.(ts|m4s|aac|jpe?g|png|gif|webp|svg|css|js|woff2?|ico|vtt|srt|json)$/i.test(bare) && (/^(video|audio)\//.test(ct) && !/mp2t/.test(ct) || /\.(mp4|webm|mov|m4v|mkv|mp3|m4a|flac)$/i.test(bare));
+        if ((playlist || file) && d.statusCode < 400) { const rq = sent.get(u) || {}; const hd = {}; if (rq.Referer) hd.Referer = rq.Referer; if (rq.Origin) hd.Origin = rq.Origin;
+          onHit(u, { playlist, key: playlist ? u : bare, ext: playlist ? (/dash|\.mpd$/i.test(ct + bare) ? "mpd" : "m3u8") : "", headers: Object.keys(hd).length ? hd : null }); }
+      } catch (e) {}
+      cb({});
+    });
+  }
+  const isGeneric = (items) => items.every((i) => /^(generic|html5)/i.test(i.site || "generic"));
+  // a master playlist and its own quality variants are one video, not several
+  function tidy(items) { const inner = new Set(items.flatMap((i) => i.variants || [])); items = items.filter((i) => !(i.source !== "extractor" && inner.has(i.previewUrl))); items.forEach((i) => delete i.variants); return items; }
+
+  // ================================================================ in-app browser (the "Browse" tab): a private window inside FreeTV, watched the same way
+  const UA_B = UA; let bses = null, bwc = null; const bhits = new Map();
+  const pageKey = (u) => String(u || "").split("#")[0];
+  function browseInit() {
+    if (bses || !ctx.session) return !!bses;
+    bses = ctx.session.fromPartition("sniffbrowse");             // in-memory profile: nothing shared with Safari/Chrome, gone when FreeTV quits
+    bses.setUserAgent(UA_B);
+    watchSession(bses, (u, h) => { if (bhits.size < 60 && ![...bhits.values()].some((x) => x.key === h.key)) { bhits.set(u, h); emit("browse", { count: bhits.size }); } });
+    bses.setPermissionRequestHandler((_, __, cb) => cb(false));
+    bses.on("will-download", (e, item) => { e.preventDefault(); const u = item.getURL(), name = item.getFilename() || "";
+      if (/^https?:/.test(u) && (MEDIA_RE.test(u.split("#")[0]) || /^(video|audio)\//.test(item.getMimeType() || ""))) { addDownload({ title: name.replace(/\.\w+$/, "") || "Download", pageUrl: u, format: { id: "file", kind: "direct", ext: (name.split(".").pop() || extOf(u) || "mp4").toLowerCase(), url: u, size: item.getTotalBytes() || 0 } }); emit("toast", { msg: "Added to downloads" }); } });
+    app.on("web-contents-created", (_, wc) => {
+      if (wc.getType() !== "webview") return; bwc = wc; let cur = "";
+      const host = (u) => { try { return new URL(u).hostname.split(".").slice(-2).join("."); } catch (e) { return ""; } };
+      // new windows never open (that is where pop-up ads live). A link the user clicked that wants a new tab opens here instead – only if it's on the same site and not script-opened.
+      wc.setWindowOpenHandler(({ url, disposition, features }) => { if (/^https?:/.test(url) && !features && disposition === "foreground-tab" && host(url) && host(url) === host(wc.getURL()) && Date.now() - lastClick < 1500) setImmediate(() => { try { wc.loadURL(url); } catch (e) {} }); return { action: "deny" }; });
+      let lastClick = 0; wc.on("input-event", (_, e) => { if (e.type === "mouseUp" || e.type === "keyUp") lastClick = Date.now(); });
+      const moved = (u) => { if (pageKey(u) !== cur) { cur = pageKey(u); bhits.clear(); emit("browse", { count: 0 }); } };
+      wc.on("did-start-navigation", (e, url, inPage, isMain) => { const d = e && e.url ? e : { url, isSameDocument: inPage, isMainFrame: isMain }; if (d.isMainFrame && !d.isSameDocument) moved(d.url); });
+      wc.on("did-navigate-in-page", (e, url, isMain) => { if (isMain) moved(url); });
+    });
+    return true;
+  }
+  async function browseItems() {
+    if (!bwc || bwc.isDestroyed()) return { items: [], notes: [] };
+    const url = bwc.getURL(), title = bwc.getTitle(); let items = [], thumb = ""; const notes = [];
+    try { thumb = await bwc.executeJavaScript(`(document.querySelector('meta[property="og:image"]')||{}).content||''`); } catch (e) {}
+    if (ytPath() && /^https?:/.test(url)) { try { const y = await analyzeYt(url); if (y.length && !isGeneric(y)) items = y; } catch (e) { if (e.drm) notes.push(e.userMsg); } }
+    if (!items.length) for (const [u, h] of [...bhits].slice(0, 25)) { try { const it = await itemFromMedia(u, { pageUrl: url, title, thumbnail: thumb, source: "network", ext: h.ext || extOf(u), headers: h.headers }); if (it) items.push(it); } catch (e) {} }
+    // nothing played yet: read the page itself as well (video tags, player scripts, embedded players)
+    if (!items.length && /^https?:/.test(url)) { try { items = await scanPage(url); } catch (e) {} }
+    items = tidy(items);
+    if (items.some((i) => i.drm)) notes.push("Some media on this page is DRM-protected and can't be downloaded.");
+    return { url, items, notes };
+  }
+
   // ================================================================ analyze
   async function analyze({ url, deep }) {
     url = String(url || "").trim(); if (!url) throw new Error("Paste a link first");
@@ -277,7 +322,7 @@ exports.init = function init(ctx) {
       try { items = await analyzeYt(url); } catch (e) { if (e.userMsg) notes.push(e.userMsg); else if (!e.unsupported && e.detail) notes.push(e.detail); }
     }
     // the extractor's "generic" mode only reports the first thing it sees – our own page scan is more complete there
-    const generic = items.length > 0 && items.every((i) => /^(generic|html5)/i.test(i.site || "generic"));
+    const generic = items.length > 0 && isGeneric(items);
     if (!items.length || generic) { step("Scanning the page for media…"); try { const found = await scanPage(url); if (found.length) items = found; } catch (e) { notes.push("Couldn't read the page: " + e.message); } }
     if (!items.length || deep) {
       step("Deep scan – loading the page like a browser…");
@@ -285,9 +330,7 @@ exports.init = function init(ctx) {
       for (const h of d.hits.slice(0, 20)) { if (have.has(h.url)) continue; step("Checking what the page loaded…");
         try { const it = await itemFromMedia(h.url, { pageUrl: url, title: d.title || undefined, source: "network", ext: h.ext || extOf(h.url), headers: h.headers }); if (it) items.push(it); } catch (e) {} }
     }
-    // a master playlist and its own quality variants are one video, not several
-    const inner = new Set(items.flatMap((i) => i.variants || []));
-    items = items.filter((i) => !(i.source !== "extractor" && inner.has(i.previewUrl))); items.forEach((i) => delete i.variants);
+    items = tidy(items);
     if (items.some((i) => i.drm)) notes.push("Some media on this page is DRM-protected and can't be downloaded.");
     if (!items.length && !notes.length) notes.push("No downloadable media was found on this page.");
     return { url, items, notes: [...new Set(notes)], extractor: !!ytPath() };
@@ -487,6 +530,8 @@ exports.init = function init(ctx) {
   const H = (name, fn) => ipcMain.handle("sn:" + name, async (_, arg) => { try { return await fn(arg || {}); } catch (e) { return { error: String(e.message || e) }; } });
   H("state", async () => ({ jobs: st.jobs, conv: st.conv, settings: st.settings, extractor: !!ytPath() }));
   H("analyze", analyze);
+  H("browseInit", async () => ({ ok: browseInit() }));
+  H("browseItems", browseItems);
   H("formats", async ({ url }) => { const items = await analyzeYt(url, false).catch((e) => { throw new Error(e.userMsg || e.detail || "Couldn't read this video"); }); return items[0]; });
   H("download", async (o) => addDownload(o));
   H("pause", async ({ id }) => { const j = job(id); if (!j) return {}; j.want = "pause"; const r = running.get(id); if (r) r.stop(); else if (j.state === "queued") { j.state = "paused"; pushJobs(); } return {}; });

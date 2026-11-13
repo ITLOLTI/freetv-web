@@ -1,5 +1,23 @@
 // English → Albanian (Shqip). Missing entries fall back to English.
 const SQ = {
+  "Browse": "Shfleto",
+  "Back": "Prapa",
+  "Search or type a web address": "Kërko ose shkruaj adresën",
+  "Private window": "Dritare private",
+  "Separate from Safari and Chrome. Sign-ins here are forgotten when FreeTV quits.": "E ndarë nga Safari dhe Chrome. Hyrjet këtu harrohen kur mbyllet FreeTV.",
+  "Browse inside FreeTV": "Shfleto brenda FreeTV",
+  "Open any site here and play a video. When FreeTV sees it, the button at the top right lights up.": "Hap çdo faqe këtu dhe luaj një video. Kur FreeTV e sheh, ndizet butoni lart djathtas.",
+  "This window is private: it shares nothing with Safari or Chrome.": "Kjo dritare është private: nuk ndan asgjë me Safari apo Chrome.",
+  "Video found": "Video u gjet",
+  "Check this page": "Kontrollo faqen",
+  "Checking this page…": "Duke kontrolluar faqen…",
+  "Found on this page": "U gjet në këtë faqe",
+  "Nothing found yet": "Ende asgjë",
+  "Check again": "Kontrollo përsëri",
+  "Start the video on the page, then press ↻ here.": "Nise videon në faqe, pastaj shtyp ↻ këtu.",
+  "can't be downloaded": "nuk shkarkohet",
+  "Show qualities": "Shfaq cilësitë",
+
   "Found a stream – checking for more…": "U gjet një transmetim – duke kërkuar të tjera…",
   "Web Sniffer": "Web Sniffer",
   "Discover": "Zbulo",

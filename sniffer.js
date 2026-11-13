@@ -1,7 +1,7 @@
 // FreeTV Web Sniffer – Mac app only. A separate screen: find media on a web page, download it, convert it.
 // Uses the helpers of app.js ($, esc, tr, sheet, toast, openPlayer…) but none of the IPTV state.
 "use strict";
-const SN = { view: "discover", url: "", deep: false, scanning: false, step: "", result: null, jobs: [], conv: [], settings: { maxActive: 3, connections: 6 }, extractor: true, ready: false,
+const SN = { burl: "", bcount: 0, bres: null, bopen: false, bbusy: false, view: "discover", url: "", deep: false, scanning: false, step: "", result: null, jobs: [], conv: [], settings: { maxActive: 3, connections: 6 }, extractor: true, ready: false,
   picked: new Set(), extra: [], opts: { format: "mp4", height: "orig", vcodec: "auto", acodec: "auto", quality: "high", vbitrate: "", abitrate: 192, fps: "orig" } };
 const snCall = (ch, arg) => window.ftvDesktop.sn(ch, arg);
 const snSize = (b) => !b ? "" : b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : b >= 1e6 ? (b / 1e6).toFixed(b < 1e7 ? 1 : 0) + " MB" : Math.max(1, Math.round(b / 1e3)) + " KB";
@@ -14,6 +14,8 @@ async function snInit() {
   window.ftvDesktop.onSn((e) => {
     if (e.type === "scan") { SN.step = e.msg; const el = $("#snstep"); if (el) el.textContent = tr(e.msg); }
     if (e.type === "jobs") { SN.jobs = e.jobs; if (snVisible()) { snBadge(); if (SN.view === "downloads") snDrawJobs(); } }
+    if (e.type === "browse") { SN.bcount = e.count; if (!e.count) { SN.bres = null; SN.bopen = false; } if (snVisible() && SN.view === "browse") { snBrowseBtn(); if (!e.count) snBrowsePanel(); } }
+    if (e.type === "toast") toast(e.msg);
     if (e.type === "conv") { SN.conv = e.conv; if (snVisible() && SN.view === "convert") snDrawConv(); }
   });
   const s = await snCall("state"); if (s && !s.error) { SN.jobs = s.jobs; SN.conv = s.conv; SN.settings = s.settings; SN.extractor = s.extractor; }
@@ -25,10 +27,10 @@ function renderSniffer(v) {
   snInit();
   const act = SN.jobs.filter((j) => j.state === "downloading" || j.state === "queued").length;
   v.innerHTML = '<div class="sn"><div class="row"><h1>' + tr("Web Sniffer") + '</h1><span class="sp"></span><div class="seg sn-seg">' +
-    [["discover", "Discover"], ["downloads", "Downloads"], ["convert", "Converter"]].map(([k, l]) => '<button data-snv="' + k + '" class="' + (SN.view === k ? "on" : "") + '">' + tr(l) +
+    [["discover", "Discover"], ["browse", "Browse"], ["downloads", "Downloads"], ["convert", "Converter"]].map(([k, l]) => '<button data-snv="' + k + '" class="' + (SN.view === k ? "on" : "") + '">' + tr(l) +
       (k === "downloads" ? ' <b id="snbadge" class="sn-badge" style="' + (act ? "" : "display:none") + '">' + act + "</b>" : "") + "</button>").join("") + '</div></div><div id="snbody"></div></div>';
   $$("[data-snv]", v).forEach((b) => b.onclick = () => { SN.view = b.dataset.snv; renderSniffer(v); });
-  ({ discover: snDiscover, downloads: snDownloads, convert: snConvert })[SN.view]($("#snbody"));
+  ({ discover: snDiscover, browse: snBrowse, downloads: snDownloads, convert: snConvert })[SN.view]($("#snbody"));
 }
 
 // ------------------------------------------------------------------ Discover
@@ -118,6 +120,65 @@ async function snDownloadAll(list) {
     const r = await snCall("download", { title: it.title, thumbnail: it.thumbnail, pageUrl: it.pageUrl, site: it.site, duration: it.duration, format: f }); if (r && !r.error && !r.duplicate) n++; }
   toast(n ? n + " " + tr("added to downloads") : "Already in your downloads");
   if (n) { SN.view = "downloads"; renderSniffer($("#view")); }
+}
+
+// ------------------------------------------------------------------ Browse (a private browser window inside FreeTV)
+function snBrowseUrl(t) {
+  t = String(t || "").trim(); if (!t) return "";
+  if (/^https?:\/\//i.test(t)) return t;
+  if (/^(localhost|\d+\.\d+\.\d+\.\d+)(:\d+)?(\/|$)/i.test(t)) return "http://" + t;
+  if (/\s/.test(t) || !/^([^\s/]+\.[a-z]{2,}|localhost|\d+\.\d+\.\d+\.\d+)(\/|:|$)/i.test(t)) return "https://duckduckgo.com/?q=" + encodeURIComponent(t);
+  return "https://" + t;
+}
+async function snBrowse(b) {
+  await snCall("browseInit");
+  if (!snVisible() || SN.view !== "browse") return;
+  b.innerHTML = '<div class="sn-bbar glass"><button class="sn-nb" id="bback" title="' + tr("Back") + '">‹</button><button class="sn-nb" id="bfwd">›</button><button class="sn-nb" id="breload">↻</button>' +
+    '<input id="baddr" type="text" spellcheck="false" placeholder="' + tr("Search or type a web address") + '" value="' + esc(SN.burl) + '"><span class="sn-priv" title="' + tr("Separate from Safari and Chrome. Sign-ins here are forgotten when FreeTV quits.") + '">● ' + tr("Private window") + "</span>" +
+    '<button class="btn primary" id="bfound"></button></div><div class="sn-bwrap"><webview id="snweb" partition="sniffbrowse" allowpopups src="' + esc(SN.burl || "about:blank") + '"></webview>' +
+    '<div id="bstart" class="empty' + (SN.burl ? " hidden" : "") + '"><div class="sn-hero">' + I.sniff + "</div><h2>" + tr("Browse inside FreeTV") + "</h2><p>" + tr("Open any site here and play a video. When FreeTV sees it, the button at the top right lights up.") +
+    '</p><p class="small">' + tr("This window is private: it shares nothing with Safari or Chrome.") + '</p></div><div id="bpanel" class="hidden"></div></div>';
+  const wv = $("#snweb"), addr = $("#baddr");
+  const go = () => { const u = snBrowseUrl(addr.value); if (!u) return; SN.burl = u; addr.value = u; $("#bstart").classList.add("hidden"); wv.src = u; addr.blur(); };
+  addr.onkeydown = (e) => { if (e.key === "Enter") go(); }; addr.onfocus = () => addr.select();
+  const nav = (e) => { if (e.isMainFrame === false || !/^https?:/.test(e.url)) return; SN.burl = e.url; if (document.activeElement !== addr) addr.value = e.url; };
+  wv.addEventListener("did-navigate", nav); wv.addEventListener("did-navigate-in-page", nav);
+  wv.addEventListener("did-start-loading", () => { $("#breload").textContent = "✕"; }); wv.addEventListener("did-stop-loading", () => { const r = $("#breload"); if (r) r.textContent = "↻"; });
+  $("#bback").onclick = () => { try { if (wv.canGoBack()) wv.goBack(); } catch (e) {} };
+  $("#bfwd").onclick = () => { try { if (wv.canGoForward()) wv.goForward(); } catch (e) {} };
+  $("#breload").onclick = () => { try { wv.isLoading() ? wv.stop() : wv.reload(); } catch (e) {} };
+  $("#bfound").onclick = () => { SN.bopen = !SN.bopen; if (SN.bopen && !SN.bres) snBrowseLoad(); else snBrowsePanel(); };
+  snBrowseBtn(); snBrowsePanel();
+  if (!SN.burl) addr.focus();
+}
+function snBrowseBtn() {
+  const b = $("#bfound"); if (!b) return;
+  b.innerHTML = I.dl + (SN.bcount ? tr("Video found") + (SN.bres && SN.bres.items.length ? ' <b class="sn-cnt">' + SN.bres.items.length + "</b>" : "") : tr("Check this page"));
+  b.classList.toggle("lit", SN.bcount > 0); b.classList.toggle("primary", SN.bcount > 0);
+}
+async function snBrowseLoad() {
+  if (SN.bbusy) return; SN.bbusy = true; SN.bopen = true; snBrowsePanel();
+  const r = await snCall("browseItems"); SN.bbusy = false; SN.bres = r && !r.error ? r : { items: [], notes: [r && r.error || ""] };
+  if (snVisible() && SN.view === "browse") { snBrowsePanel(); snBrowseBtn(); }
+}
+function snBrowsePanel() {
+  const p = $("#bpanel"); if (!p) return;
+  p.classList.toggle("hidden", !SN.bopen); if (!SN.bopen) return;
+  if (SN.bbusy) { p.innerHTML = '<div class="row" style="gap:14px"><div class="sn-radar" style="width:34px;height:34px"><i></i><i></i><i></i></div><div>' + tr("Checking this page…") + "</div></div>"; return; }
+  const r = SN.bres || { items: [], notes: [] };
+  p.innerHTML = '<div class="row"><h4>' + (r.items.length ? '<span class="sn-dot"></span>' + tr("Found on this page") : tr("Nothing found yet")) + '</h4><span class="sp"></span><button class="sn-nb" id="bref" title="' + tr("Check again") + '">↻</button><button class="sn-nb" id="bclose">✕</button></div>' +
+    (r.notes || []).filter(Boolean).map((n) => '<div class="small dim" style="margin:4px 0 8px">' + esc(tr(n)) + "</div>").join("") +
+    (r.items.length ? "" : '<div class="small dim">' + tr("Start the video on the page, then press ↻ here.") + "</div>") +
+    r.items.map((it, i) => '<div class="sn-bitem"><div class="sn-pv"><div class="sn-jth">' + (it.thumbnail ? '<img referrerpolicy="no-referrer" src="' + esc(it.thumbnail) + '" onerror="this.remove()">' : "") + '</div><div style="min-width:0;flex:1"><div class="sn-t" style="margin:0 0 3px">' + esc(it.title) + '</div><div class="small dim">' +
+        esc([it.duration ? fmtTime(it.duration) : "", it.site].filter(Boolean).join(" · ")) + "</div></div>" + (it.previewUrl && !it.drm && !it.needsFormats ? '<button class="sn-nb" data-bp="' + i + '" title="' + tr("Preview") + '">▶</button>' : "") + "</div>" +
+      (it.drm ? '<div class="sn-q bad">' + tr("Protected (DRM)") + " – " + tr("can't be downloaded") + "</div>" : it.live ? '<div class="sn-q">' + tr("Live · preview only") + "</div>" :
+        it.needsFormats ? '<button class="sn-q" data-bn="' + i + '"><span>' + tr("Show qualities") + "</span></button>" :
+        it.formats.map((f, k) => '<button class="sn-q" data-bi="' + i + '" data-bf="' + k + '"><span>' + esc(tr(f.label)) + '</span><small>' + esc([(f.audio || f.ext || "").toUpperCase(), (f.size ? "~" : "") + snSize(f.size)].filter(Boolean).join(" · ")) + " ⬇</small></button>").join("")) + "</div>").join("");
+  $("#bclose").onclick = () => { SN.bopen = false; snBrowsePanel(); };
+  $("#bref").onclick = () => { SN.bres = null; snBrowseLoad(); };
+  $$("[data-bf]", p).forEach((x) => x.onclick = () => { const it = r.items[+x.dataset.bi]; snQueue(it, it.formats[+x.dataset.bf]); });
+  $$("[data-bn]", p).forEach((x) => x.onclick = async () => { x.textContent = "…"; if (await snEnsureFormats(r.items[+x.dataset.bn])) snBrowsePanel(); });
+  $$("[data-bp]", p).forEach((x) => x.onclick = () => { try { $("#snweb").executeJavaScript("document.querySelectorAll('video,audio').forEach(v=>v.pause())"); } catch (e) {} snPreview(r.items[+x.dataset.bp]); });
 }
 
 // ------------------------------------------------------------------ Downloads

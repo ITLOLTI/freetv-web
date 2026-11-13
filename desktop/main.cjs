@@ -317,9 +317,11 @@ app.whenReady().then(async () => { try {
   win = new BrowserWindow({
     width: 1360, height: 860, minWidth: 900, minHeight: 600, backgroundColor: "#0A0E14", title: "FreeTV",
     titleBarStyle: "hiddenInset", trafficLightPosition: { x: 14, y: 14 },
-    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: false, backgroundThrottling: false },
+    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: false, backgroundThrottling: false, webviewTag: true },
   });
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: "deny" }; });
+  // the Web Sniffer's in-app browser: web pages get no access to FreeTV or the Mac, only a plain sandboxed page
+  win.webContents.on("will-attach-webview", (e, wp, params) => { delete wp.preload; wp.nodeIntegration = false; wp.contextIsolation = true; wp.sandbox = true; if (params.partition !== "sniffbrowse") e.preventDefault(); });
   if (!port) throw new Error("FreeTV could not start its local server (ports 47811-47831 are busy).");
   win.loadURL("http://127.0.0.1:" + port + "/");
 } catch (e) { const m = logErr("start", e); dialog.showErrorBox("FreeTV could not start", m); app.quit(); } });

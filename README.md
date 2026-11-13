@@ -28,6 +28,7 @@ The same app as a real Mac app – **no relay needed**, plus:
 A separate screen next to the IPTV tabs:
 
 - **Discover** – paste a page or video link, press *Analyze*. FreeTV lists the media it finds (title, thumbnail, length, qualities, size). Three engines: a site extractor (yt-dlp), FreeTV's own page scan (video tags, JSON-LD, HLS/DASH playlists, embedded players) and an optional *Deep scan* that loads the page in a hidden window and watches what it loads.
+- **Browse** – a private browser window inside FreeTV (shares nothing with Safari or Chrome, forgotten when FreeTV quits, pop-ups blocked). Play a video on any page and the *Video found* button lights up; pick a quality to download.
 - **Downloads** – several downloads at once, several connections per file, pause / resume, automatic retry, speed and time left, duplicate warning, history. Files go to `FreeTV/Web`.
 - **Converter** – MP4, MOV, MKV, AVI, WebM, MP3, M4A, AAC, WAV, FLAC with resolution, codecs, bitrate, frame rate and quality; several files in a row. Files go to `FreeTV/Converted`.
 
