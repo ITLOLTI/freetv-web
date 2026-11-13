@@ -17,6 +17,7 @@ async function snInit() {
     if (e.type === "browse") { SN.bcount = e.count; if (!e.count) { SN.bres = null; SN.bopen = false; } if (snVisible() && SN.view === "browse") { snBrowseBtn(); if (!e.count) snBrowsePanel(); } }
     if (e.type === "toast") toast(e.msg);
     if (e.type === "bnav") snBrowseNav(e);
+    if (e.type === "bclick" && S.tab === "sniffer" && SN.view === "browse") { SN.bres = null; snBrowseLoad(); }
     if (e.type === "conv") { SN.conv = e.conv; if (snVisible() && SN.view === "convert") snDrawConv(); }
   });
   const s = await snCall("state"); if (s && !s.error) { SN.jobs = s.jobs; SN.conv = s.conv; SN.settings = s.settings; SN.extractor = s.extractor; }
@@ -132,7 +133,7 @@ function snBrowseUrl(t) {
   return "https://" + t;
 }
 async function snBrowse(b) {
-  await snCall("browseInit");
+  await snCall("browseInit"); snCall("browse", { cmd: "noop", label: tr("Download") });
   if (!snVisible() || SN.view !== "browse") return;
   b.innerHTML = '<div class="sn-bbar glass"><button class="sn-nb" id="bback" title="' + tr("Back") + '">‹</button><button class="sn-nb" id="bfwd">›</button><button class="sn-nb" id="breload">↻</button>' +
     '<input id="baddr" type="text" spellcheck="false" placeholder="' + tr("Search or type a web address") + '" value="' + esc(SN.burl) + '"><span class="sn-priv" title="' + tr("Separate from Safari and Chrome. Sign-ins here are forgotten when FreeTV quits.") + '">● ' + tr("Private window") + "</span>" +

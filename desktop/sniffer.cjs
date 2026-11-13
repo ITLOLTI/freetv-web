@@ -105,10 +105,11 @@ exports.init = function init(ctx) {
   }
 
   // ================================================================ page scan
-  async function fetchText(url, headers, max = 3e6, timeout = 15000) {
+  async function fetchText(url, headers, max = 3e6, timeout = 15000, ses = null) {
     const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeout);
     try {
-      const r = await fetch(url, { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.8", ...(headers || {}) }, signal: ctl.signal, redirect: "follow" });
+      const opts = { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.8", ...(headers || {}) }, signal: ctl.signal, redirect: "follow" };
+      const r = ses && ses.fetch ? await ses.fetch(url, { ...opts, credentials: "include", bypassCustomProtocolHandlers: true }) : await fetch(url, opts);
       const type = (r.headers.get("content-type") || "").toLowerCase();
       if (!r.ok) throw new Error("the site answered " + r.status);
       if (/^(video|audio)\//.test(type) || /octet-stream/.test(type)) { try { await r.body.cancel(); } catch (e) {} return { text: "", type, url: r.url, size: +r.headers.get("content-length") || 0 }; }
@@ -132,12 +133,13 @@ exports.init = function init(ctx) {
     for (const m of html.matchAll(/["']((?:aHR0c|Ly9)[A-Za-z0-9+/=]{16,})["']/g)) { try { extra += "\n\"" + Buffer.from(m[1], "base64").toString("utf8") + "\""; } catch (e) {} }
     return extra;
   }
-  async function inspectHls(url, headers) {
+  async function inspectHls(url, headers, ses) {
     const out = { variants: [], duration: 0, live: false, drm: false };
-    const { text } = await fetchText(url, headers, 2e6, 12000);
+    const { text } = await fetchText(url, headers, 2e6, 12000, ses);
     if (!text.includes("#EXTM3U")) throw new Error("not a playlist");
     if (DRM_RE.test(text)) out.drm = true;
     const lines = text.split(/\r?\n/);
+    out.renditions = [...text.matchAll(/#EXT-X-(?:MEDIA|I-FRAME-STREAM-INF)[^\n]*URI="([^"]+)"/g)].map((m) => { try { return new URL(m[1], url).toString(); } catch (e) { return ""; } }).filter(Boolean);
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
         const res = /RESOLUTION=(\d+)x(\d+)/.exec(lines[i]), bw = /[^-]BANDWIDTH=(\d+)/.exec(lines[i]) || /BANDWIDTH=(\d+)/.exec(lines[i]);
@@ -148,7 +150,7 @@ exports.init = function init(ctx) {
     const media = async (t) => { let d = 0; for (const m of t.matchAll(/#EXTINF:([\d.]+)/g)) d += +m[1]; return { d, live: !t.includes("#EXT-X-ENDLIST") }; };
     if (out.variants.length) {
       out.variants.sort((a, b) => b.height - a.height || b.bandwidth - a.bandwidth);
-      try { const v = await fetchText(out.variants[0].url, headers, 2e6, 12000); if (DRM_RE.test(v.text)) out.drm = true; const m = await media(v.text); out.duration = m.d; out.live = m.live; } catch (e) {}
+      try { const v = await fetchText(out.variants[0].url, headers, 2e6, 12000, ses); if (DRM_RE.test(v.text)) out.drm = true; const m = await media(v.text); out.duration = m.d; out.live = m.live; } catch (e) {}
     } else { const m = await media(text); out.duration = m.d; out.live = m.live; }
     return out;
   }
@@ -159,21 +161,21 @@ exports.init = function init(ctx) {
       title: meta.title || decodeURIComponent(url.split("/").pop().split("?")[0]) || "Video", description: meta.description || "", thumbnail: meta.thumbnail || "", duration: meta.duration || 0,
       pageUrl: meta.pageUrl || url, formats: [], previewUrl: url, previewHeaders: headers, drm: false, live: false };
     if (ext === "m3u8") {
-      const h = await inspectHls(url, headers);
-      base.drm = h.drm; base.live = h.live; base.variants = h.variants.map((v) => v.url); base.duration = base.duration || Math.round(h.duration);
+      const h = await inspectHls(url, headers, meta.ses);
+      base.drm = h.drm; base.live = h.live; base.variants = [...h.variants.map((v) => v.url), ...(h.renditions || [])]; base.duration = base.duration || Math.round(h.duration);
       if (!h.drm && !h.live) {
         const vs = h.variants.length ? h.variants : [{ height: 0, bandwidth: 0, url }];
         const seen = new Set();
         for (const v of vs) { const k = v.height || v.bandwidth; if (seen.has(k)) continue; seen.add(k);
-          base.formats.push({ id: "hls" + k, kind: "hls", label: v.height ? v.height + "p" : "Stream", height: v.height, ext: "mp4", url: v.url, headers, size: Math.round((v.bandwidth / 8) * h.duration) }); }
-        base.formats.push({ id: "mp3", kind: "hls", audio: "mp3", label: "Audio only · MP3", ext: "mp3", url: vs[vs.length - 1].url, headers, size: Math.round(h.duration * 16000) });
+          base.formats.push({ id: "hls" + k, kind: "hls", label: v.height ? v.height + "p" + (v.height >= 2160 ? " 4K" : "") : "Stream", height: v.height, bandwidth: v.bandwidth, ext: "mp4", url: v.url, master: h.variants.length ? url : "", browse: !!meta.ses, headers, size: Math.round((v.bandwidth / 8) * h.duration) }); }
+        base.formats.push({ id: "mp3", kind: "hls", audio: "mp3", label: "Audio only · MP3", ext: "mp3", url: vs[vs.length - 1].url, master: h.variants.length ? url : "", browse: !!meta.ses, headers, size: Math.round(h.duration * 16000) });
       }
     } else if (ext === "mpd") {
-      const { text } = await fetchText(url, headers, 2e6, 12000);
+      const { text } = await fetchText(url, headers, 2e6, 12000, meta.ses);
       base.drm = /ContentProtection/i.test(text) && DRM_RE.test(text) || /cenc:default_KID/i.test(text);
       base.live = /type="dynamic"/.test(text); base.duration = base.duration || iso((/mediaPresentationDuration="([^"]+)"/.exec(text) || [])[1]);
       const hs = [...new Set([...text.matchAll(/<Representation[^>]*height="(\d+)"/g)].map((m) => +m[1]))].sort((a, b) => b - a);
-      if (!base.drm && !base.live) base.formats.push({ id: "dash", kind: "dash", label: hs[0] ? hs[0] + "p (best)" : "Stream", height: hs[0] || 0, ext: "mp4", url, headers, size: 0 });
+      if (!base.drm && !base.live) base.formats.push({ id: "dash", kind: "dash", label: hs[0] ? hs[0] + "p (best)" : "Stream", height: hs[0] || 0, ext: "mp4", url, browse: !!meta.ses, headers, size: 0 });
     } else {
       let size = meta.size || 0, type = "";
       if (!size) try {
@@ -183,7 +185,7 @@ exports.init = function init(ctx) {
         if (r.ok && /text\/html/.test(type)) return null;
       } catch (e) {}
       const audio = AUDIO_EXT.includes(ext);
-      base.formats.push({ id: "file", kind: "direct", label: (ext || "file").toUpperCase() + (audio ? " audio" : ""), ext: ext || "mp4", url, headers, size });
+      base.formats.push({ id: "file", kind: "direct", browse: !!meta.ses, label: (ext || "file").toUpperCase() + (audio ? " audio" : ""), ext: ext || "mp4", url, headers, size });
     }
     return base;
   }
@@ -283,7 +285,7 @@ exports.init = function init(ctx) {
     if (bses || !ctx.session) return !!bses;
     bses = ctx.session.fromPartition("sniffbrowse");             // in-memory profile: nothing shared with Safari/Chrome, gone when FreeTV quits
     bses.setUserAgent(UA_B);
-    watchSession(bses, (u, h) => { if (bhits.size < 60 && ![...bhits.values()].some((x) => x.key === h.key)) { bhits.set(u, h); emit("browse", { count: bhits.size }); } });
+    watchSession(bses, (u, h) => { if (bhits.size < 60 && ![...bhits.values()].some((x) => x.key === h.key)) { bhits.set(u, h); emit("browse", { count: bhits.size }); clearTimeout(btnTimer); btnTimer = setTimeout(() => showBtn(true), 300); } });
     bses.setPermissionRequestHandler((_, __, cb) => cb(false));
     bses.on("will-download", (e, item) => { e.preventDefault(); const u = item.getURL(), name = item.getFilename() || "";
       if (/^https?:/.test(u) && (MEDIA_RE.test(u.split("#")[0]) || /^(video|audio)\//.test(item.getMimeType() || ""))) { addDownload({ title: name.replace(/\.\w+$/, "") || "Download", pageUrl: u, format: { id: "file", kind: "direct", ext: (name.split(".").pop() || extOf(u) || "mp4").toLowerCase(), url: u, size: item.getTotalBytes() || 0 } }); emit("toast", { msg: "Added to downloads" }); } });
@@ -304,7 +306,9 @@ exports.init = function init(ctx) {
     const host = (u) => { try { return new URL(u).hostname.split(".").slice(-2).join("."); } catch (e) { return ""; } };
     const nav = (extra = {}) => { if (wc.isDestroyed()) return; const nh = wc.navigationHistory;
       emit("bnav", { url: wc.getURL(), title: wc.getTitle(), loading: wc.isLoading(), canBack: nh ? nh.canGoBack() : wc.canGoBack(), canFwd: nh ? nh.canGoForward() : wc.canGoForward(), ...extra }); };
-    const moved = (u) => { if (pageKey(u) !== cur) { cur = pageKey(u); bhits.clear(); emit("browse", { count: 0 }); } };
+    const moved = (u) => { if (pageKey(u) !== cur) { cur = pageKey(u); bhits.clear(); emit("browse", { count: 0 }); showBtn(false); } };
+    wc.on("console-message", (e, level, message) => { const m = (e && e.message) || message; if (m === "__ftv_dl_click__") emit("bclick", {}); });
+    wc.on("did-frame-finish-load", () => { if (bhits.size) setTimeout(() => showBtn(true), 400); });
     // new windows never open (that is where pop-up ads live). A same-site link the user clicked that wants a new tab opens here instead.
     wc.setWindowOpenHandler(({ url, disposition, features }) => { if (/^https?:/.test(url) && !features && disposition === "foreground-tab" && host(url) && host(url) === host(wc.getURL()) && Date.now() - lastClick < 1500) setImmediate(() => { try { wc.loadURL(url); } catch (e) {} }); return { action: "deny" }; });
     wc.on("input-event", (_, e) => { if (e.type === "mouseUp" || e.type === "keyUp") lastClick = Date.now(); });
@@ -316,7 +320,32 @@ exports.init = function init(ctx) {
     wc.on("render-process-gone", () => nav({ error: "The page stopped working. Press ↻ to reload it." }));
     return bview;
   }
-  function browseCmd({ cmd, url, x, y, w, h, show }) {
+  // a small "Download" button laid over the video inside the page, like IDM's. It lives in a closed shadow root;
+  // a click only asks FreeTV to open its own panel (via a console message), nothing else.
+  let blabel = "Download", btnTimer = 0;
+  const OVERLAY = (label) => `(()=>{try{const W=window;if(W.__ftvDl){W.__ftvDl.t=Date.now();return}
+    const host=document.createElement('div');host.style.cssText='all:initial;position:fixed;z-index:2147483647;top:0;left:0;display:none';
+    const sh=host.attachShadow({mode:'closed'});sh.innerHTML='<style>b{all:initial;display:flex;align-items:center;gap:6px;font:600 13px -apple-system,Helvetica,Arial,sans-serif;color:#000;background:#4aa3ff;padding:7px 12px 7px 10px;border-radius:10px;cursor:pointer;box-shadow:0 4px 18px rgba(0,0,0,.45);user-select:none;opacity:.94;transition:transform .15s,opacity .15s}b:hover{opacity:1;transform:scale(1.05)}svg{width:15px;height:15px}</style><b><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M6.5 10.5 12 16l5.5-5.5M5 20h14"/></svg>${label.replace(/[<>&'"\\]/g,'')}</b>';
+    const go=e=>{e.preventDefault();e.stopPropagation();e.stopImmediatePropagation&&e.stopImmediatePropagation();console.log('__ftv_dl_click__')};
+    for(const ev of['click','mousedown','mouseup','pointerdown','pointerup'])sh.querySelector('b').addEventListener(ev,ev==='click'?go:(e=>{e.stopPropagation()}),true);
+    const top=W===W.top;
+    const place=()=>{const fs=document.fullscreenElement||document.webkitFullscreenElement;const root=fs||document.documentElement;if(host.parentNode!==root)root.appendChild(host);
+      let best=null,area=0;for(const v of document.querySelectorAll('video')){const r=v.getBoundingClientRect();const a=Math.max(0,Math.min(r.right,innerWidth)-Math.max(r.left,0))*Math.max(0,Math.min(r.bottom,innerHeight)-Math.max(r.top,0));if(r.width>=200&&r.height>=110&&a>area){area=a;best=r}}
+      if(!best&&top){const big=[...document.querySelectorAll('iframe')].some(f=>{const r=f.getBoundingClientRect();return r.width>=300&&r.height>=170&&r.bottom>0&&r.top<innerHeight});if(!big)best={top:0,right:innerWidth,fixed:1}}
+      if(!best){host.style.display='none';return}
+      host.style.display='block';const bw=host.offsetWidth||110;host.style.top=Math.max(8,best.top+10)+'px';host.style.left=Math.max(8,Math.min(innerWidth-bw-8,best.right-bw-10))+'px'};
+    W.__ftvDl={t:Date.now(),place,host};place();
+    const iv=setInterval(()=>{if(!W.__ftvDl||Date.now()-W.__ftvDl.t>8000){host.remove();clearInterval(iv);delete W.__ftvDl;return}place()},400);
+    addEventListener('scroll',place,true);addEventListener('resize',place);document.addEventListener('fullscreenchange',place)}catch(e){}})()`;
+  const REMOVE = `(()=>{try{if(window.__ftvDl){window.__ftvDl.host.remove();window.__ftvDl.t=0}}catch(e){}})()`;
+  function showBtn(on) {
+    if (!bwc || bwc.isDestroyed()) return;
+    try { for (const f of bwc.mainFrame.framesInSubtree) f.executeJavaScript(on ? OVERLAY(blabel) : REMOVE, false).catch(() => {}); } catch (e) {}
+  }
+  // keeps the button alive (players rebuild their DOM) while media was found on this page
+  setInterval(() => { if (bhits.size && bview && bwc && !bwc.isDestroyed()) showBtn(true); }, 3000).unref?.();
+  function browseCmd({ cmd, url, x, y, w, h, show, label }) {
+    if (label) blabel = String(label).slice(0, 30);
     const v = browseView(); if (!v) return { error: "The browser isn't available" }; const wc = v.webContents, nh = wc.navigationHistory;
     if (cmd === "place") {
       if (!show || w < 20 || h < 20) { v.setVisible ? v.setVisible(false) : v.setBounds({ x: 0, y: 0, width: 0, height: 0 }); return {}; }
@@ -337,7 +366,7 @@ exports.init = function init(ctx) {
     const url = bwc.getURL(), title = bwc.getTitle(); let items = [], thumb = ""; const notes = [];
     try { thumb = await bwc.executeJavaScript(`(document.querySelector('meta[property="og:image"]')||{}).content||''`); } catch (e) {}
     if (ytPath() && /^https?:/.test(url)) { try { const y = await analyzeYt(url); if (y.length && !isGeneric(y)) items = y; } catch (e) { if (e.drm) notes.push(e.userMsg); } }
-    if (!items.length) for (const [u, h] of [...bhits].slice(0, 25)) { try { const it = await itemFromMedia(u, { pageUrl: url, title, thumbnail: thumb, source: "network", ext: h.ext || extOf(u), headers: h.headers }); if (it) items.push(it); } catch (e) {} }
+    if (!items.length) for (const [u, h] of [...bhits].slice(0, 25)) { try { const it = await itemFromMedia(u, { pageUrl: url, title, thumbnail: thumb, source: "network", ext: h.ext || extOf(u), headers: h.headers, ses: bses }); if (it) items.push(it); } catch (e) {} }
     // nothing played yet: read the page itself as well (video tags, player scripts, embedded players)
     if (!items.length && /^https?:/.test(url)) { try { items = await scanPage(url); } catch (e) {} }
     items = tidy(items);
@@ -380,11 +409,13 @@ exports.init = function init(ctx) {
     const dup = st.jobs.find((j) => j.sig === sig && j.state !== "canceled" && j.state !== "failed");
     if (dup && !o.force) return { duplicate: true, id: dup.id, state: dup.state };
     const useYt = f.kind === "ytdlp" || ((f.kind === "hls" || f.kind === "dash") && !!ytPath());
+    // an HLS quality is fetched from its master playlist, so separate audio tracks come along
+    const hlsSel = f.kind === "hls" && useYt && f.master ? (f.audio ? "" : f.height ? `bv*[height<=${f.height}]+ba/b[height<=${f.height}]/bv*+ba/b` : "bv*+ba/b") : "";
     const ext = "." + (f.audio || f.ext || "mp4");
     const dir = folder(AUDIO_EXT.includes(ext.slice(1)) ? path.join("Web", "Audio") : "Web");
     const file = uniquePath(dir, safe(o.title) + (f.height && !f.audio ? " " + f.height + "p" : ""), ext);
     const j = { id: "w" + Date.now() + Math.floor(Math.random() * 999), sig, title: o.title, thumbnail: o.thumbnail || "", pageUrl: o.pageUrl, site: o.site || "", label: f.label || "",
-      engine: useYt ? "ytdlp" : f.kind === "direct" ? "direct" : "ffmpeg", url: f.kind === "ytdlp" ? o.pageUrl : f.url, headers: f.headers || null, sel: f.sel || "", sort: f.sort || "", audio: f.audio || "",
+      engine: useYt ? "ytdlp" : f.kind === "direct" ? "direct" : "ffmpeg", url: f.kind === "ytdlp" ? o.pageUrl : (useYt && f.master) || f.url, headers: f.headers || null, browse: !!f.browse, sel: f.sel || hlsSel, sort: f.sort || (hlsSel && f.height ? `res:${f.height}` : ""), audio: f.audio || "",
       duration: o.duration || 0, file, state: "queued", size: 0, total: f.size || 0, speed: 0, eta: 0, tries: 0, created: Date.now(), error: "" };
     st.jobs.unshift(j); pushJobs(); pump();
     return { id: j.id };
@@ -416,10 +447,24 @@ exports.init = function init(ctx) {
       for (const f of fs.readdirSync(dir)) if (f.startsWith(b + ".") && (/\.(part|ytdl)$/.test(f) || /\.part-Frag\d+/.test(f) || /\.f\d+\.\w+$/.test(f) || f === path.basename(j.file) + ".part")) try { fs.unlinkSync(path.join(dir, f)); } catch (e) {}
     } catch (e) {}
   }
+  async function browseCookies(j) {
+    if (!j.browse || !bses) return [];
+    const all = new Map();
+    for (const u of [j.url, j.pageUrl]) { try { for (const c of await bses.cookies.get({ url: u })) all.set(c.domain + c.path + c.name, c); } catch (e) {} }
+    return [...all.values()];
+  }
+  async function cookieHeader(j) { const c = await browseCookies(j); return c.length ? { Cookie: c.map((x) => x.name + "=" + x.value).join("; ") } : {}; }
+  async function cookieFile(j) {
+    const c = await browseCookies(j); if (!c.length) return null;
+    const f = path.join(app.getPath("userData"), "cookies-" + j.id + ".txt");
+    fs.writeFileSync(f, "# Netscape HTTP Cookie File\n" + c.map((x) => { const d = x.hostOnly ? x.domain.replace(/^\./, "") : (x.domain.startsWith(".") ? x.domain : "." + x.domain);
+      return [d, x.hostOnly ? "FALSE" : "TRUE", x.path || "/", x.secure ? "TRUE" : "FALSE", Math.round(x.expirationDate || 0), x.name, x.value].join("\t"); }).join("\n") + "\n", { mode: 0o600 });
+    return f;
+  }
   // --- direct files: several connections at once, each fetching its own byte range (resumable)
   async function runDirect(j) {
     const ctl = new AbortController(); running.set(j.id, { stop: () => ctl.abort() });
-    const H = { "User-Agent": UA, ...(j.headers || {}) }; const tmp = j.file + ".part";
+    const H = { "User-Agent": UA, ...(j.headers || {}), ...(await cookieHeader(j)) }; const tmp = j.file + ".part";
     if (!j.parts || !fs.existsSync(tmp)) {
       const r = await fetch(j.url, { headers: { ...H, Range: "bytes=0-0" }, signal: ctl.signal });
       const cr = r.headers.get("content-range"); let total = 0, ranges = false;
@@ -448,7 +493,11 @@ exports.init = function init(ctx) {
     fs.closeSync(fd); fs.renameSync(tmp, j.file);
   }
   // --- sites and streams: yt-dlp (parallel fragments, resume, merge with ffmpeg)
-  function runYtJob(j) {
+  async function runYtJob(j) {
+    const ck = await cookieFile(j);
+    try { await runYtJob2(j, ck); } finally { if (ck) try { fs.unlinkSync(ck); } catch (e) {} }
+  }
+  function runYtJob2(j, ck) {
     return new Promise((resolve, reject) => {
       const tpl = j.file.slice(0, -path.extname(j.file).length) + ".%(ext)s";
       const args = [...jsArgs(), "--no-warnings", "--newline", "--progress", "--no-playlist", "--no-mtime", "--continue", "--ffmpeg-location", ctx.ffmpegPath(), "-N", String(st.settings.connections), "--retries", "10", "--fragment-retries", "10",
@@ -456,6 +505,7 @@ exports.init = function init(ctx) {
       if (j.audio) args.push("-f", "ba/b", "-x", "--audio-format", j.audio, "--audio-quality", "0");
       else { args.push("-f", j.sel || "bv*+ba/b"); if (j.sort) args.push("-S", j.sort); args.push("--merge-output-format", "mp4"); }
       for (const [k, v] of Object.entries(j.headers || {})) args.push("--add-header", k + ":" + v);
+      if (ck) args.push("--cookies", ck);
       args.push(j.url);
       const p = spawn(ytPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
       running.set(j.id, { stop: () => { try { p.kill("SIGTERM"); } catch (e) {} } });
@@ -478,9 +528,10 @@ exports.init = function init(ctx) {
     });
   }
   // --- HLS / DASH without yt-dlp: ffmpeg copies the stream into one file
-  function runFfmpegJob(j) {
+  async function runFfmpegJob(j) { const ck = await cookieHeader(j); return runFfmpegJob2(j, ck); }
+  function runFfmpegJob2(j, ck) {
     return new Promise((resolve, reject) => {
-      const tmp = j.file + ".part"; const h = { ...(j.headers || {}) };
+      const tmp = j.file + ".part"; const h = { ...(j.headers || {}), ...ck };
       const args = ["-hide_banner", "-nostdin", "-y", "-user_agent", UA];
       if (Object.keys(h).length) args.push("-headers", Object.entries(h).map(([k, v]) => k + ": " + v).join("\r\n") + "\r\n");
       args.push("-i", j.url);
