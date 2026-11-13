@@ -47,9 +47,12 @@ exports.init = function init(ctx) {
     for (const p of [user, bundled, "/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp", process.env.FTV_YTDLP || ""]) if (p && fs.existsSync(p)) return p;
     return null;
   }
+  // YouTube's full format list (1080p, 4K…) needs a JavaScript engine; FreeTV ships Deno for that
+  function denoPath() { for (const p of [path.join(__dirname, "bin", "deno"), process.env.FTV_DENO || "", "/opt/homebrew/bin/deno", "/usr/local/bin/deno"]) if (p && fs.existsSync(p)) return p; return null; }
+  const jsArgs = () => { const d = denoPath(); return d ? ["--js-runtimes", "deno:" + d] : []; };
   function runYt(args, timeout = 90000) {
     return new Promise((resolve) => {
-      const p = spawn(ytPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
+      const p = spawn(ytPath(), [...jsArgs(), ...args], { stdio: ["ignore", "pipe", "pipe"] });
       let out = "", err = ""; const t = setTimeout(() => { try { p.kill("SIGKILL"); } catch (e) {} }, timeout);
       p.stdout.on("data", (d) => { out += d; }); p.stderr.on("data", (d) => { err = (err + d).slice(-6000); });
       p.on("close", (code) => { clearTimeout(t); resolve({ code, out, err }); });
@@ -448,7 +451,7 @@ exports.init = function init(ctx) {
   function runYtJob(j) {
     return new Promise((resolve, reject) => {
       const tpl = j.file.slice(0, -path.extname(j.file).length) + ".%(ext)s";
-      const args = ["--no-warnings", "--newline", "--progress", "--no-playlist", "--no-mtime", "--continue", "--ffmpeg-location", ctx.ffmpegPath(), "-N", String(st.settings.connections), "--retries", "10", "--fragment-retries", "10",
+      const args = [...jsArgs(), "--no-warnings", "--newline", "--progress", "--no-playlist", "--no-mtime", "--continue", "--ffmpeg-location", ctx.ffmpegPath(), "-N", String(st.settings.connections), "--retries", "10", "--fragment-retries", "10",
         "--progress-template", "download:FTVP|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s", "--print", "after_move:FTVF|%(filepath)s", "-o", tpl];
       if (j.audio) args.push("-f", "ba/b", "-x", "--audio-format", j.audio, "--audio-quality", "0");
       else { args.push("-f", j.sel || "bv*+ba/b"); if (j.sort) args.push("-S", j.sort); args.push("--merge-output-format", "mp4"); }
@@ -561,7 +564,7 @@ exports.init = function init(ctx) {
 
   // ================================================================ IPC
   const H = (name, fn) => ipcMain.handle("sn:" + name, async (_, arg) => { try { return await fn(arg || {}); } catch (e) { return { error: String(e.message || e) }; } });
-  H("state", async () => ({ jobs: st.jobs, conv: st.conv, settings: st.settings, extractor: !!ytPath() }));
+  H("state", async () => ({ jobs: st.jobs, conv: st.conv, settings: st.settings, extractor: !!ytPath(), js: !!denoPath() }));
   H("analyze", analyze);
   H("browseInit", async () => ({ ok: browseInit() }));
   H("browseItems", browseItems);

@@ -40,6 +40,10 @@ jobs:
           mkdir -p desktop/bin
           curl -fL --retry 3 -o desktop/bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos
           chmod +x desktop/bin/yt-dlp
+          # JavaScript engine yt-dlp needs for YouTube's full quality list (1080p, 4K)
+          curl -fL --retry 3 -o deno.zip https://github.com/denoland/deno/releases/latest/download/deno-${{ matrix.arch == 'arm64' && 'aarch64' || 'x86_64' }}-apple-darwin.zip
+          unzip -o deno.zip -d desktop/bin && rm deno.zip && chmod +x desktop/bin/deno
+          file desktop/bin/deno
           ls -la desktop/bin
 
       - name: Build the .dmg
