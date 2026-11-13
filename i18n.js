@@ -1,5 +1,12 @@
 // English → Albanian (Shqip). Missing entries fall back to English.
 const SQ = {
+  "This site wasn't found. Check the address.": "Faqja nuk u gjet. Kontrollo adresën.",
+  "No internet connection.": "Nuk ka internet.",
+  "The site didn't answer.": "Faqja nuk u përgjigj.",
+  "This site's security certificate isn't valid.": "Certifikata e sigurisë së faqes nuk është e vlefshme.",
+  "This site doesn't allow being opened here.": "Kjo faqe nuk lejon të hapet këtu.",
+  "This page couldn't be opened": "Kjo faqe nuk u hap",
+  "The page stopped working. Press ↻ to reload it.": "Faqja ndaloi. Shtyp ↻ për ta rihapur.",
   "Browse": "Shfleto",
   "Back": "Prapa",
   "Search or type a web address": "Kërko ose shkruaj adresën",

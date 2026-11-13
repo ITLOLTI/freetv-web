@@ -274,7 +274,7 @@ exports.init = function init(ctx) {
   function tidy(items) { const inner = new Set(items.flatMap((i) => i.variants || [])); items = items.filter((i) => !(i.source !== "extractor" && inner.has(i.previewUrl))); items.forEach((i) => delete i.variants); return items; }
 
   // ================================================================ in-app browser (the "Browse" tab): a private window inside FreeTV, watched the same way
-  const UA_B = UA; let bses = null, bwc = null; const bhits = new Map();
+  const UA_B = UA; let bses = null, bwc = null, bview = null; const bhits = new Map();
   const pageKey = (u) => String(u || "").split("#")[0];
   function browseInit() {
     if (bses || !ctx.session) return !!bses;
@@ -284,17 +284,50 @@ exports.init = function init(ctx) {
     bses.setPermissionRequestHandler((_, __, cb) => cb(false));
     bses.on("will-download", (e, item) => { e.preventDefault(); const u = item.getURL(), name = item.getFilename() || "";
       if (/^https?:/.test(u) && (MEDIA_RE.test(u.split("#")[0]) || /^(video|audio)\//.test(item.getMimeType() || ""))) { addDownload({ title: name.replace(/\.\w+$/, "") || "Download", pageUrl: u, format: { id: "file", kind: "direct", ext: (name.split(".").pop() || extOf(u) || "mp4").toLowerCase(), url: u, size: item.getTotalBytes() || 0 } }); emit("toast", { msg: "Added to downloads" }); } });
-    app.on("web-contents-created", (_, wc) => {
-      if (wc.getType() !== "webview") return; bwc = wc; let cur = "";
-      const host = (u) => { try { return new URL(u).hostname.split(".").slice(-2).join("."); } catch (e) { return ""; } };
-      // new windows never open (that is where pop-up ads live). A link the user clicked that wants a new tab opens here instead – only if it's on the same site and not script-opened.
-      wc.setWindowOpenHandler(({ url, disposition, features }) => { if (/^https?:/.test(url) && !features && disposition === "foreground-tab" && host(url) && host(url) === host(wc.getURL()) && Date.now() - lastClick < 1500) setImmediate(() => { try { wc.loadURL(url); } catch (e) {} }); return { action: "deny" }; });
-      let lastClick = 0; wc.on("input-event", (_, e) => { if (e.type === "mouseUp" || e.type === "keyUp") lastClick = Date.now(); });
-      const moved = (u) => { if (pageKey(u) !== cur) { cur = pageKey(u); bhits.clear(); emit("browse", { count: 0 }); } };
-      wc.on("did-start-navigation", (e, url, inPage, isMain) => { const d = e && e.url ? e : { url, isSameDocument: inPage, isMainFrame: isMain }; if (d.isMainFrame && !d.isSameDocument) moved(d.url); });
-      wc.on("did-navigate-in-page", (e, url, isMain) => { if (isMain) moved(url); });
-    });
     return true;
+  }
+  // the page itself is a native view laid over the FreeTV window (more reliable on macOS than an embedded <webview>)
+  function browseView() {
+    if (bview) return bview;
+    browseInit();
+    const V = ctx.WebContentsView || ctx.BrowserView; const win = ctx.getWin(); if (!V || !win) return null;
+    const wp = { partition: "sniffbrowse", sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false };
+    bview = new V({ webPreferences: wp });
+    if (win.contentView && ctx.WebContentsView) win.contentView.addChildView(bview); else win.addBrowserView(bview);
+    try { bview.setBorderRadius && bview.setBorderRadius(14); } catch (e) {}
+    try { bview.setBackgroundColor && bview.setBackgroundColor("#ffffff"); } catch (e) {}
+    bview.setVisible ? bview.setVisible(false) : bview.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+    const wc = bwc = bview.webContents; wc.setUserAgent(UA_B); let cur = "", lastClick = 0;
+    const host = (u) => { try { return new URL(u).hostname.split(".").slice(-2).join("."); } catch (e) { return ""; } };
+    const nav = (extra = {}) => { if (wc.isDestroyed()) return; const nh = wc.navigationHistory;
+      emit("bnav", { url: wc.getURL(), title: wc.getTitle(), loading: wc.isLoading(), canBack: nh ? nh.canGoBack() : wc.canGoBack(), canFwd: nh ? nh.canGoForward() : wc.canGoForward(), ...extra }); };
+    const moved = (u) => { if (pageKey(u) !== cur) { cur = pageKey(u); bhits.clear(); emit("browse", { count: 0 }); } };
+    // new windows never open (that is where pop-up ads live). A same-site link the user clicked that wants a new tab opens here instead.
+    wc.setWindowOpenHandler(({ url, disposition, features }) => { if (/^https?:/.test(url) && !features && disposition === "foreground-tab" && host(url) && host(url) === host(wc.getURL()) && Date.now() - lastClick < 1500) setImmediate(() => { try { wc.loadURL(url); } catch (e) {} }); return { action: "deny" }; });
+    wc.on("input-event", (_, e) => { if (e.type === "mouseUp" || e.type === "keyUp") lastClick = Date.now(); });
+    wc.on("did-start-navigation", (e, url, inPage, isMain) => { const d = e && e.url ? e : { url, isSameDocument: inPage, isMainFrame: isMain }; if (d.isMainFrame && !d.isSameDocument) moved(d.url); });
+    wc.on("did-navigate-in-page", (e, url, isMain) => { if (isMain) moved(url); nav({ ok: true }); });
+    wc.on("did-navigate", (e, url, code) => nav({ ok: true, code }));
+    for (const ev of ["did-start-loading", "did-stop-loading", "page-title-updated"]) wc.on(ev, () => nav());
+    wc.on("did-fail-load", (_, code, desc, url, isMain) => { if (isMain && code !== -3) nav({ error: ({ ERR_NAME_NOT_RESOLVED: "This site wasn't found. Check the address.", ERR_INTERNET_DISCONNECTED: "No internet connection.", ERR_CONNECTION_REFUSED: "The site didn't answer.", ERR_CONNECTION_TIMED_OUT: "The site didn't answer.", ERR_TIMED_OUT: "The site didn't answer.", ERR_CERT_AUTHORITY_INVALID: "This site's security certificate isn't valid.", ERR_BLOCKED_BY_RESPONSE: "This site doesn't allow being opened here." })[desc] || desc || "This page couldn't be opened", failedUrl: url }); });
+    wc.on("render-process-gone", () => nav({ error: "The page stopped working. Press ↻ to reload it." }));
+    return bview;
+  }
+  function browseCmd({ cmd, url, x, y, w, h, show }) {
+    const v = browseView(); if (!v) return { error: "The browser isn't available" }; const wc = v.webContents, nh = wc.navigationHistory;
+    if (cmd === "place") {
+      if (!show || w < 20 || h < 20) { v.setVisible ? v.setVisible(false) : v.setBounds({ x: 0, y: 0, width: 0, height: 0 }); return {}; }
+      const z = ctx.getWin().webContents.getZoomFactor() || 1;
+      v.setBounds({ x: Math.round(x * z), y: Math.round(y * z), width: Math.round(w * z), height: Math.round(h * z) }); if (v.setVisible) v.setVisible(true);
+      return {};
+    }
+    if (cmd === "go" && /^https?:\/\//i.test(url || "")) wc.loadURL(url).catch(() => {});
+    if (cmd === "back") nh ? nh.canGoBack() && nh.goBack() : wc.canGoBack() && wc.goBack();
+    if (cmd === "fwd") nh ? nh.canGoForward() && nh.goForward() : wc.canGoForward() && wc.goForward();
+    if (cmd === "reload") wc.reload(); if (cmd === "stop") wc.stop();
+    if (cmd === "pause") wc.executeJavaScript("document.querySelectorAll('video,audio').forEach(v=>v.pause())", true).catch(() => {});
+    if (cmd === "state") return { url: wc.getURL(), title: wc.getTitle(), loading: wc.isLoading() };
+    return {};
   }
   async function browseItems() {
     if (!bwc || bwc.isDestroyed()) return { items: [], notes: [] };
@@ -532,6 +565,7 @@ exports.init = function init(ctx) {
   H("analyze", analyze);
   H("browseInit", async () => ({ ok: browseInit() }));
   H("browseItems", browseItems);
+  H("browse", browseCmd);
   H("formats", async ({ url }) => { const items = await analyzeYt(url, false).catch((e) => { throw new Error(e.userMsg || e.detail || "Couldn't read this video"); }); return items[0]; });
   H("download", async (o) => addDownload(o));
   H("pause", async ({ id }) => { const j = job(id); if (!j) return {}; j.want = "pause"; const r = running.get(id); if (r) r.stop(); else if (j.state === "queued") { j.state = "paused"; pushJobs(); } return {}; });
@@ -547,5 +581,5 @@ exports.init = function init(ctx) {
   H("convStop", async ({ id }) => { const r = running.get(id); if (r) r.stop(); else { const c = st.conv.find((x) => x.id === id); if (c && c.state === "queued") { c.state = "canceled"; pushConv(); } } return {}; });
   H("convRemove", async ({ id }) => { const r = running.get(id); if (r) r.stop(); st.conv = st.conv.filter((x) => x.id !== id); pushConv(); return {}; });
   H("updateExtractor", async () => { if (!ytPath()) return { error: "The extractor isn't installed" }; const r = await runYt(["-U"], 120000); return { text: (r.out + r.err).trim().split("\n").pop() }; });
-  return { stopAll: () => { for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
+  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
 };

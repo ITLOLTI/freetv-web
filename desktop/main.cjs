@@ -3,7 +3,8 @@
 //  • recording of live channels (ffmpeg, stream copy – no quality loss, little CPU),
 //  • downloads of movies and episodes (resumable),
 //  • a destination folder you choose.
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu, session } = require("electron");
+const electron = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, session } = electron;
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -302,7 +303,7 @@ ipcMain.handle("ftv:open", (_, file) => shell.openPath(file || cfg.folder));
 
 // ---------------------------------------------------------------- Web Sniffer (separate module, see sniffer.cjs)
 let sniffer = null;
-try { sniffer = require("./sniffer.cjs").init({ app, ipcMain, dialog, shell, BrowserWindow, session, getWin: () => win, ffmpegPath, getFolder: () => cfg.folder }); } catch (e) { logErr("sniffer", e); }
+try { sniffer = require("./sniffer.cjs").init({ app, ipcMain, dialog, shell, BrowserWindow, session, WebContentsView: electron.WebContentsView, BrowserView: electron.BrowserView, getWin: () => win, ffmpegPath, getFolder: () => cfg.folder }); } catch (e) { logErr("sniffer", e); }
 
 app.whenReady().then(async () => { try {
   loadCfg();
@@ -317,11 +318,9 @@ app.whenReady().then(async () => { try {
   win = new BrowserWindow({
     width: 1360, height: 860, minWidth: 900, minHeight: 600, backgroundColor: "#0A0E14", title: "FreeTV",
     titleBarStyle: "hiddenInset", trafficLightPosition: { x: 14, y: 14 },
-    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: false, backgroundThrottling: false, webviewTag: true },
+    webPreferences: { preload: path.join(__dirname, "preload.cjs"), contextIsolation: true, sandbox: false, backgroundThrottling: false },
   });
   win.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: "deny" }; });
-  // the Web Sniffer's in-app browser: web pages get no access to FreeTV or the Mac, only a plain sandboxed page
-  win.webContents.on("will-attach-webview", (e, wp, params) => { delete wp.preload; wp.nodeIntegration = false; wp.contextIsolation = true; wp.sandbox = true; if (params.partition !== "sniffbrowse") e.preventDefault(); });
   if (!port) throw new Error("FreeTV could not start its local server (ports 47811-47831 are busy).");
   win.loadURL("http://127.0.0.1:" + port + "/");
 } catch (e) { const m = logErr("start", e); dialog.showErrorBox("FreeTV could not start", m); app.quit(); } });
