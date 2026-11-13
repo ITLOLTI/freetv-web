@@ -193,7 +193,7 @@ function snBrowsePanel() {
   if (SN.bbusy) { p.innerHTML = '<div class="row" style="gap:14px"><div class="sn-radar" style="width:34px;height:34px"><i></i><i></i><i></i></div><div>' + tr("Checking this page…") + "</div></div>"; return; }
   const r = SN.bres || { items: [], notes: [] };
   p.innerHTML = '<div class="row"><h4>' + (r.items.length ? '<span class="sn-dot"></span>' + tr("Found on this page") : tr("Nothing found yet")) + '</h4><span class="sp"></span><button class="sn-nb" id="bref" title="' + tr("Check again") + '">↻</button><button class="sn-nb" id="bclose">✕</button></div>' +
-    (r.notes || []).filter(Boolean).map((n) => '<div class="small dim" style="margin:4px 0 8px">' + esc(tr(n)) + "</div>").join("") +
+    (r.notes || []).filter(Boolean).map((n) => '<div class="small dim" style="margin:4px 0 8px">' + esc(tr(n) !== n || !n.includes(": ") ? tr(n) : tr(n.split(": ")[0] + ":") + " " + n.split(": ").slice(1).join(": ")) + "</div>").join("") +
     (r.items.length ? "" : '<div class="small dim">' + tr("Start the video on the page, then press ↻ here.") + "</div>") +
     r.items.map((it, i) => '<div class="sn-bitem"><div class="sn-pv"><div class="sn-jth">' + (it.thumbnail ? '<img referrerpolicy="no-referrer" src="' + esc(it.thumbnail) + '" onerror="this.remove()">' : "") + '</div><div style="min-width:0;flex:1"><div class="sn-t" style="margin:0 0 3px">' + esc(it.title) + '</div><div class="small dim">' +
         esc([it.duration ? fmtTime(it.duration) : "", it.site].filter(Boolean).join(" · ")) + "</div></div>" + (it.previewUrl && !it.drm && !it.needsFormats ? '<button class="sn-nb" data-bp="' + i + '" title="' + tr("Preview") + '">▶</button>' : "") + "</div>" +

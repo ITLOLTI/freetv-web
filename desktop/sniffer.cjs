@@ -109,10 +109,16 @@ exports.init = function init(ctx) {
     const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), timeout);
     try {
       const opts = { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.8", ...(headers || {}) }, signal: ctl.signal, redirect: "follow" };
-      const r = ses && ses.fetch ? await ses.fetch(url, { ...opts, credentials: "include", bypassCustomProtocolHandlers: true }) : await fetch(url, opts);
+      let r;
+      if (ses && ses.fetch) {
+        try { r = await ses.fetch(url, { ...opts, credentials: "include", bypassCustomProtocolHandlers: true }); if (!r.ok) throw new Error("the site answered " + r.status); }
+        catch (e) { let ck = ""; try { ck = (await ses.cookies.get({ url })).map((c) => c.name + "=" + c.value).join("; "); } catch (x) {}
+          r = await fetch(url, { ...opts, headers: { ...opts.headers, ...(ck ? { Cookie: ck } : {}) } }); }
+      } else r = await fetch(url, opts);
       const type = (r.headers.get("content-type") || "").toLowerCase();
       if (!r.ok) throw new Error("the site answered " + r.status);
-      if (/^(video|audio)\//.test(type) || /octet-stream/.test(type)) { try { await r.body.cancel(); } catch (e) {} return { text: "", type, url: r.url, size: +r.headers.get("content-length") || 0 }; }
+      const playlistUrl = /\.(m3u8|mpd)(\?|$)/i.test(url) || /mpegurl|dash\+xml/.test(type);
+      if (!playlistUrl && (/^(video|audio)\//.test(type) || /octet-stream/.test(type))) { try { await r.body.cancel(); } catch (e) {} return { text: "", type, url: r.url, size: +r.headers.get("content-length") || 0 }; }
       let text = "", n = 0; const dec = new TextDecoder();
       for await (const c of Readable.fromWeb(r.body)) { n += c.length; text += dec.decode(c, { stream: true }); if (n > max) break; }
       return { text, type, url: r.url, size: 0 };
@@ -263,12 +269,15 @@ exports.init = function init(ctx) {
   // what counts as media in a page's network traffic (shared by the deep scan and the in-app browser)
   function watchSession(ses, onHit) {
     const sent = new Map();
-    ses.webRequest.onBeforeSendHeaders((d, cb) => { try { const h = d.requestHeaders || {}; sent.set(d.url, { Referer: h.Referer || h.referer || "", Origin: h.Origin || h.origin || "" }); if (sent.size > 4000) sent.clear(); } catch (e) {} cb({}); });
+    // remember the headers the page's own player sent (Referer, Origin, tokens like Authorization / X-…) so FreeTV can repeat the same request
+    ses.webRequest.onBeforeSendHeaders((d, cb) => { try { const h = d.requestHeaders || {}, keep = {};
+      for (const [k, v] of Object.entries(h)) if (/^(referer|origin|authorization|x-[\w-]+)$/i.test(k) && !/^x-client-data$/i.test(k)) keep[k.toLowerCase() === "referer" ? "Referer" : k.toLowerCase() === "origin" ? "Origin" : k] = v;
+      sent.set(d.url, keep); if (sent.size > 4000) sent.clear(); } catch (e) {} cb({}); });
     ses.webRequest.onHeadersReceived((d, cb) => {
       try { const h = d.responseHeaders || {}; const ct = String((h["content-type"] || h["Content-Type"] || [""])[0]).toLowerCase(); const u = d.url, bare = u.split("#")[0].split("?")[0];
         const playlist = /mpegurl|dash\+xml/.test(ct) || /\.(m3u8|mpd)$/i.test(bare);
         const file = !/\.(ts|m4s|aac|jpe?g|png|gif|webp|svg|css|js|woff2?|ico|vtt|srt|json)$/i.test(bare) && (/^(video|audio)\//.test(ct) && !/mp2t/.test(ct) || /\.(mp4|webm|mov|m4v|mkv|mp3|m4a|flac)$/i.test(bare));
-        if ((playlist || file) && d.statusCode < 400) { const rq = sent.get(u) || {}; const hd = {}; if (rq.Referer) hd.Referer = rq.Referer; if (rq.Origin) hd.Origin = rq.Origin;
+        if ((playlist || file) && d.statusCode < 400) { const hd = { ...(sent.get(u) || {}) };
           onHit(u, { playlist, key: playlist ? u : bare, ext: playlist ? (/dash|\.mpd$/i.test(ct + bare) ? "mpd" : "m3u8") : "", headers: Object.keys(hd).length ? hd : null }); }
       } catch (e) {}
       cb({});
@@ -366,7 +375,18 @@ exports.init = function init(ctx) {
     const url = bwc.getURL(), title = bwc.getTitle(); let items = [], thumb = ""; const notes = [];
     try { thumb = await bwc.executeJavaScript(`(document.querySelector('meta[property="og:image"]')||{}).content||''`); } catch (e) {}
     if (ytPath() && /^https?:/.test(url)) { try { const y = await analyzeYt(url); if (y.length && !isGeneric(y)) items = y; } catch (e) { if (e.drm) notes.push(e.userMsg); } }
-    if (!items.length) for (const [u, h] of [...bhits].slice(0, 25)) { try { const it = await itemFromMedia(u, { pageUrl: url, title, thumbnail: thumb, source: "network", ext: h.ext || extOf(u), headers: h.headers, ses: bses }); if (it) items.push(it); } catch (e) {} }
+    const failed = [];
+    if (!items.length) for (const [u, h] of [...bhits].slice(0, 25)) { try { const it = await itemFromMedia(u, { pageUrl: url, title, thumbnail: thumb, source: "network", ext: h.ext || extOf(u), headers: h.headers, ses: bses }); if (it) items.push(it); } catch (e) { failed.push({ u, h, e }); } }
+    // a stream the page played but FreeTV couldn't inspect: still offer it, the downloader picks the best quality itself
+    const pl = failed.filter((f) => f.h.playlist);
+    if (!items.some((i) => i.formats.length) && pl.length && ytPath()) {
+      const f = pl.find((x) => /master|playlist|index|manifest/i.test(x.u)) || pl[0];
+      items.push({ id: "f" + Date.now(), source: "network", site: (() => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch (e) { return ""; } })(), title, thumbnail: thumb, duration: 0, pageUrl: url,
+        previewUrl: f.u, previewHeaders: f.h.headers, drm: false, live: false,
+        formats: [{ id: "best", kind: f.h.ext === "mpd" ? "dash" : "hls", label: "Best quality", ext: "mp4", url: f.u, master: f.u, browse: true, headers: f.h.headers, size: 0 },
+                  { id: "mp3", kind: "hls", audio: "mp3", label: "Audio only · MP3", ext: "mp3", url: f.u, master: f.u, browse: true, headers: f.h.headers, size: 0 }] });
+      notes.push("FreeTV couldn't read the quality list of this stream, so it will download the best quality available.");
+    } else if (!items.length && failed.length) notes.push("A stream was found but couldn't be read: " + String(failed[0].e && failed[0].e.message || "").slice(0, 120));
     // nothing played yet: read the page itself as well (video tags, player scripts, embedded players)
     if (!items.length && /^https?:/.test(url)) { try { items = await scanPage(url); } catch (e) {} }
     items = tidy(items);

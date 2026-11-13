@@ -1,5 +1,8 @@
 // English → Albanian (Shqip). Missing entries fall back to English.
 const SQ = {
+  "Best quality": "Cilësia më e mirë",
+  "FreeTV couldn't read the quality list of this stream, so it will download the best quality available.": "FreeTV nuk e lexoi dot listën e cilësive të këtij stream-i, ndaj do ta shkarkojë në cilësinë më të mirë që ekziston.",
+  "A stream was found but couldn't be read:": "U gjet një stream, por nuk u lexua:",
   "This site wasn't found. Check the address.": "Faqja nuk u gjet. Kontrollo adresën.",
   "No internet connection.": "Nuk ka internet.",
   "The site didn't answer.": "Faqja nuk u përgjigj.",
