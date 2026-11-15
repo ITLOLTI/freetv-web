@@ -7,6 +7,7 @@
 const fs = require("node:fs"), path = require("node:path");
 const { spawn } = require("node:child_process");
 const { Readable } = require("node:stream");
+const crypto = require("node:crypto");
 
 const UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const MEDIA_RE = /\.(m3u8|mpd|mp4|webm|mov|m4v|mkv|mp3|m4a|aac|flac|wav|ogg|opus)(?=$|[?#])/i;
@@ -394,6 +395,94 @@ exports.init = function init(ctx) {
     return { url, items, notes };
   }
 
+  // ================================================================ MEGA public links
+  // A public MEGA link carries its own key after the "#": the file is downloaded and decrypted exactly as
+  // MEGA's website does it. Folder links are listed file by file. MEGA's transfer limits are respected.
+  const MEGA_API = process.env.FTV_MEGA_API || "https://g.api.mega.co.nz/cs";
+  const isMega = (u) => /^https?:\/\/(www\.)?mega\.(nz|co\.nz|io)\//i.test(u);
+  const b64u = (s) => Buffer.from(String(s).replace(/-/g, "+").replace(/_/g, "/").replace(/,/g, ""), "base64");
+  function parseMega(u) {
+    let m;
+    if ((m = /\/(file|folder)\/([\w-]+)#([\w-]+)(?:\/(?:file|folder)\/([\w-]+))?/i.exec(u))) return { kind: m[1].toLowerCase(), id: m[2], key: m[3], sub: m[4] || "" };
+    if ((m = /#(F?)!([\w-]+)!([\w-]+)/.exec(u))) return { kind: m[1] ? "folder" : "file", id: m[2], key: m[3], sub: "" };
+    return null;
+  }
+  function megaKeys(raw) {           // 32-byte file key → AES key, CTR IV
+    const k = Buffer.alloc(16); for (let i = 0; i < 16; i++) k[i] = raw[i] ^ raw[i + 16];
+    const iv = Buffer.alloc(16); raw.copy(iv, 0, 16, 24);
+    return { key: k, iv };
+  }
+  function megaAttrs(at, key) {
+    try { const d = crypto.createDecipheriv("aes-128-cbc", key, Buffer.alloc(16)); d.setAutoPadding(false);
+      const buf = b64u(at), pad = Buffer.concat([buf, Buffer.alloc((16 - (buf.length % 16)) % 16)]);
+      const t = Buffer.concat([d.update(pad), d.final()]).toString("utf8").replace(/\0+$/, "");
+      return t.startsWith("MEGA{") ? JSON.parse(t.slice(4)) : {}; } catch (e) { return {}; }
+  }
+  const MEGA_ERR = { "-2": "MEGA rejected the request.", "-3": "MEGA is busy right now. Try again in a moment.", "-4": "MEGA's limit was reached. Try again later.", "-9": "This MEGA file or folder doesn't exist (any more).",
+    "-11": "This MEGA link isn't public.", "-14": "The key in this MEGA link is wrong.", "-16": "MEGA has taken this file down.", "-17": "MEGA's free transfer limit is used up for now. Try again later.", "-18": "MEGA says this file is temporarily unavailable." };
+  async function megaApi(body, folder) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const r = await fetch(MEGA_API + "?id=" + Math.floor(Math.random() * 1e9) + (folder ? "&n=" + folder : ""), { method: "POST", headers: { "Content-Type": "application/json", "User-Agent": UA }, body: JSON.stringify([body]) });
+      if (r.status === 509) throw new Error(MEGA_ERR["-17"]);
+      const j = await r.json(); const v = Array.isArray(j) ? j[0] : j;
+      if (v === -3 && attempt < 3) { await sleep(1000 * (attempt + 1)); continue; }
+      if (typeof v === "number" && v < 0) throw new Error(MEGA_ERR[String(v)] || "MEGA answered with error " + v);
+      if (typeof j === "number" && j < 0) throw new Error(MEGA_ERR[String(j)] || "MEGA answered with error " + j);
+      return v;
+    }
+  }
+  const VIDEO_EXT = ["mp4", "mkv", "avi", "mov", "m4v", "webm", "ts", "flv", "wmv", "mpg", "mpeg", "3gp"];
+  function megaItem({ name, size, handle, folder, rawKey, pageUrl }) {
+    const ext = (String(name).split(".").pop() || "").toLowerCase(), video = VIDEO_EXT.includes(ext), audio = AUDIO_EXT.includes(ext);
+    const base = { kind: "mega", mega: { handle, folder: folder || "", key: rawKey.toString("base64") }, ext, size, url: "mega:" + (folder ? folder + "/" : "") + handle };
+    const formats = [{ ...base, id: "orig", label: "Original file · " + (ext || "file").toUpperCase() }];
+    if (video && ext !== "mp4") formats.push({ ...base, id: "mp4", label: "Download and convert to MP4", toMp4: true, out: "mp4" });
+    if (video) formats.push({ ...base, id: "mp3", label: "Download and extract MP3", toMp3: true, out: "mp3" });
+    return { id: "mg" + handle, source: "mega", site: "MEGA", title: name.replace(/\.[^.]+$/, "") || "MEGA file", fileName: name, description: "", thumbnail: "", duration: 0, pageUrl, formats, previewUrl: "", drm: false, live: false, video: video || audio };
+  }
+  async function megaItems(url) {
+    const m = parseMega(url); if (!m) throw new Error("This MEGA link has no key. Copy the whole link, including the part after #.");
+    const key = b64u(m.key);
+    if (m.kind === "file") {
+      if (key.length !== 32) throw new Error(MEGA_ERR["-14"]);
+      step("Asking MEGA about the file…");
+      const r = await megaApi({ a: "g", p: m.id, ssl: 2 });
+      const { key: ak } = megaKeys(key); const at = megaAttrs(r.at, ak);
+      if (!at.n) throw new Error(MEGA_ERR["-14"]);
+      return [megaItem({ name: at.n, size: r.s, handle: m.id, rawKey: key, pageUrl: url })];
+    }
+    if (key.length !== 16) throw new Error(MEGA_ERR["-14"]);
+    step("Reading the MEGA folder…");
+    const r = await megaApi({ a: "f", c: 1, r: 1, ca: 1 }, m.id);
+    const nodes = r.f || [], out = [], names = new Map();
+    for (const n of nodes) {                                     // folder names for nicer titles
+      if (n.t !== 1 || !n.k) continue;
+      try { const ek = b64u(String(n.k).split(":").pop()); const d = crypto.createDecipheriv("aes-128-ecb", key, null); d.setAutoPadding(false); const fk = Buffer.concat([d.update(ek), d.final()]); names.set(n.h, megaAttrs(n.a, fk).n || ""); } catch (e) {}
+    }
+    for (const n of nodes) {
+      if (n.t !== 0 || !n.k) continue;
+      if (m.sub && n.h !== m.sub) continue;
+      try { const ek = b64u(String(n.k).split(":").pop()); if (ek.length !== 32) continue;
+        const d = crypto.createDecipheriv("aes-128-ecb", key, null); d.setAutoPadding(false); const fk = Buffer.concat([d.update(ek), d.final()]);
+        const at = megaAttrs(n.a, megaKeys(fk).key); if (!at.n) continue;
+        const it = megaItem({ name: at.n, size: n.s, handle: n.h, folder: m.id, rawKey: fk, pageUrl: url }); const dir = names.get(n.p); if (dir) it.description = dir; out.push(it);
+      } catch (e) {}
+    }
+    if (!out.length) throw new Error("This MEGA folder has no files FreeTV can read.");
+    return out.sort((a, b) => a.fileName.localeCompare(b.fileName, undefined, { numeric: true })).slice(0, 300);
+  }
+  async function megaUrl(j) {                                    // download links expire, so a fresh one is asked for each start
+    const r = await megaApi(j.mega.folder ? { a: "g", g: 1, n: j.mega.handle, ssl: 2 } : { a: "g", g: 1, p: j.mega.handle, ssl: 2 }, j.mega.folder);
+    if (!r.g) throw new Error(MEGA_ERR["-18"]);
+    return r;
+  }
+  function megaDecipherAt(j, offset) {
+    const { key, iv } = megaKeys(Buffer.from(j.mega.key, "base64"));
+    const ctr = Buffer.from(iv); ctr.writeBigUInt64BE(BigInt(Math.floor(offset / 16)), 8);
+    const d = crypto.createDecipheriv("aes-128-ctr", key, ctr); if (offset % 16) d.update(Buffer.alloc(offset % 16));
+    return d;
+  }
+
   // ================================================================ analyze
   async function analyze({ url, deep }) {
     url = String(url || "").trim(); if (!url) throw new Error("Paste a link first");
@@ -401,6 +490,7 @@ exports.init = function init(ctx) {
     try { new URL(url); } catch (e) { throw new Error("That doesn't look like a web address"); }
     const notes = []; let items = [];
     step("Checking the link…");
+    if (isMega(url)) { try { return { url, items: await megaItems(url), notes: [], extractor: !!ytPath() }; } catch (e) { return { url, items: [], notes: [e.message], extractor: !!ytPath() }; } }
     if (MEDIA_RE.test(url.split("#")[0])) { try { const it = await itemFromMedia(url, { source: "direct" }); if (it) items = [it]; } catch (e) {} }
     if (!items.length && ytPath()) {
       step("Asking the media extractor…");
@@ -433,9 +523,9 @@ exports.init = function init(ctx) {
     const hlsSel = f.kind === "hls" && useYt && f.master ? (f.audio ? "" : f.height ? `bv*[height<=${f.height}]+ba/b[height<=${f.height}]/bv*+ba/b` : "bv*+ba/b") : "";
     const ext = "." + (f.audio || f.ext || "mp4");
     const dir = folder(AUDIO_EXT.includes(ext.slice(1)) ? path.join("Web", "Audio") : "Web");
-    const file = uniquePath(dir, safe(o.title) + (f.height && !f.audio ? " " + f.height + "p" : ""), ext);
+    const file = f.kind === "mega" ? uniquePath(folder(path.join("Web", "MEGA")), safe(o.title), "." + (f.ext || "bin")) : uniquePath(dir, safe(o.title) + (f.height && !f.audio ? " " + f.height + "p" : ""), ext);
     const j = { id: "w" + Date.now() + Math.floor(Math.random() * 999), sig, title: o.title, thumbnail: o.thumbnail || "", pageUrl: o.pageUrl, site: o.site || "", label: f.label || "",
-      engine: useYt ? "ytdlp" : f.kind === "direct" ? "direct" : "ffmpeg", url: f.kind === "ytdlp" ? o.pageUrl : (useYt && f.master) || f.url, headers: f.headers || null, browse: !!f.browse, sel: f.sel || hlsSel, sort: f.sort || (hlsSel && f.height ? `res:${f.height}` : ""), audio: f.audio || "",
+      engine: f.kind === "mega" ? "mega" : useYt ? "ytdlp" : f.kind === "direct" ? "direct" : "ffmpeg", mega: f.mega || null, after: f.toMp4 ? "mp4" : f.toMp3 ? "mp3" : "", url: f.kind === "ytdlp" ? o.pageUrl : (useYt && f.master) || f.url, headers: f.headers || null, browse: !!f.browse, sel: f.sel || hlsSel, sort: f.sort || (hlsSel && f.height ? `res:${f.height}` : ""), audio: f.audio || "",
       duration: o.duration || 0, file, state: "queued", size: 0, total: f.size || 0, speed: 0, eta: 0, tries: 0, created: Date.now(), error: "" };
     st.jobs.unshift(j); pushJobs(); pump();
     return { id: j.id };
@@ -447,14 +537,17 @@ exports.init = function init(ctx) {
   async function start(j) {
     j.state = "downloading"; j.error = ""; j.want = ""; pushJobs();
     try {
-      await (j.engine === "direct" ? runDirect(j) : j.engine === "ytdlp" ? runYtJob(j) : runFfmpegJob(j));
+      if (j.engine === "mega") { const r = await megaUrl(j); j.url = r.g; if (r.s) j.total = r.s; }
+      await (j.engine === "direct" || j.engine === "mega" ? runDirect(j) : j.engine === "ytdlp" ? runYtJob(j) : runFfmpegJob(j));
       try { j.size = j.total = fs.statSync(j.file).size; } catch (e) {}
       Object.assign(j, { state: "done", speed: 0, eta: 0, ended: Date.now(), parts: undefined });
+      if (j.after === "mp4") addConvert({ inputs: [j.file], opts: { format: "mp4", vcodec: "smart", acodec: "smart", quality: "high", abitrate: 192 } });
+      if (j.after === "mp3") addConvert({ inputs: [j.file], opts: { format: "mp3", abitrate: 256 } });
     } catch (e) {
       running.delete(j.id);
       if (j.want === "pause") Object.assign(j, { state: "paused", speed: 0 });
       else if (j.want === "cancel") { j.state = "canceled"; cleanup(j); }
-      else if (!/answered 4\d\d|DRM|sign-in|country/.test(String(e.message)) && ++j.tries <= 4) {                             // automatic retry after an interruption
+      else if (!/answered 4\d\d|answered 509|DRM|sign-in|country|MEGA/.test(String(e.message)) && ++j.tries <= 4) {                             // automatic retry after an interruption
         j.error = "Retrying (" + j.tries + "/4)…"; j.speed = 0; pushJobs(); await sleep(2000 * j.tries);
         if (j.state === "downloading" && !j.want) return start(j);
         if (j.want === "pause") j.state = "paused"; else if (j.want === "cancel") { j.state = "canceled"; cleanup(j); }
@@ -488,7 +581,7 @@ exports.init = function init(ctx) {
     if (!j.parts || !fs.existsSync(tmp)) {
       const r = await fetch(j.url, { headers: { ...H, Range: "bytes=0-0" }, signal: ctl.signal });
       const cr = r.headers.get("content-range"); let total = 0, ranges = false;
-      if (r.status === 206 && cr) { total = +cr.split("/")[1] || 0; ranges = total > 0; } else if (r.ok) total = +r.headers.get("content-length") || 0; else throw new Error("the server answered " + r.status);
+      if (r.status === 206 && cr) { total = +cr.split("/")[1] || 0; ranges = total > 0; } else if (r.ok) total = +r.headers.get("content-length") || 0; else throw new Error(r.status === 509 && j.engine === "mega" ? MEGA_ERR["-17"] : "the server answered " + r.status);
       try { await r.body.cancel(); } catch (e) {}
       const n = ranges && total > 4 * 1048576 ? Math.max(1, Math.min(st.settings.connections, Math.ceil(total / (2 * 1048576)))) : 1, sz = Math.ceil(total / n);
       j.total = total; j.ranges = ranges; j.parts = [];
@@ -501,9 +594,12 @@ exports.init = function init(ctx) {
       if (p.e >= 0 && p.s + p.d > p.e) return;
       const h = { ...H }; if (j.ranges) h.Range = `bytes=${p.s + p.d}-${p.e}`;
       const r = await fetch(j.url, { headers: h, signal: ctl.signal });
+      if (r.status === 509) throw new Error(MEGA_ERR["-17"]);
       if (!r.ok) throw new Error("the server answered " + r.status);
       if (j.ranges && r.status !== 206) throw new Error("the server stopped supporting resume");
-      for await (const c of Readable.fromWeb(r.body)) {
+      const dec = j.engine === "mega" ? megaDecipherAt(j, p.s + p.d) : null;
+      for await (let c of Readable.fromWeb(r.body)) {
+        if (dec) c = dec.update(c);
         await new Promise((res, rej) => fs.write(fd, c, 0, c.length, p.s + p.d, (e) => (e ? rej(e) : res())));
         p.d += c.length; j.size = j.parts.reduce((a, x) => a + x.d, 0);
       }
@@ -579,11 +675,26 @@ exports.init = function init(ctx) {
   const AUDIO_OUT = { mp3: ["libmp3lame", "mp3"], m4a: ["aac", "ipod"], aac: ["aac", "adts"], wav: ["pcm_s16le", "wav"], flac: ["flac", "flac"] };
   const VCODEC = { h264: "libx264", hevc: "libx265", vp9: "libvpx-vp9", mpeg4: "mpeg4" }, ACODEC = { aac: "aac", mp3: "libmp3lame", opus: "libopus", flac: "flac" };
   const CRF = { h264: [18, 23, 28], hevc: [22, 27, 31], vp9: [28, 33, 38], mpeg4: [3, 6, 10] };
+  function probe(file) {
+    try { const r = require("node:child_process").spawnSync(ctx.ffmpegPath(), ["-hide_banner", "-i", file], { encoding: "utf8", timeout: 20000 }); const t = r.stderr || "";
+      const vl = (/Stream #[^\n]*Video: [^\n]*/.exec(t) || [""])[0];
+      let v = ((/Video: (\w+)/.exec(vl) || [])[1] || "").toLowerCase();
+      if (v === "h264" && !/yuv420p[, ]|yuvj420p|nv12/.test(vl)) v = "h264x";            // 4:4:4 / 10-bit H.264 won't play on Apple devices: re-encode
+      if (v === "hevc" && !/yuv420p(10le)?[, ]/.test(vl)) v = "hevcx";
+      return { v, a: ((/Stream #[^\n]*Audio: (\w+)/.exec(t) || [])[1] || "").toLowerCase() }; } catch (e) { return { v: "", a: "" }; }
+  }
   function convArgs(input, output, o) {
     const fmt = o.format, a = ["-hide_banner", "-nostdin", "-y", "-i", input];
     if (AUDIO_OUT[fmt]) { a.push("-vn", "-c:a", AUDIO_OUT[fmt][0]); if (fmt === "mp3" || fmt === "m4a" || fmt === "aac") a.push("-b:a", (o.abitrate || 192) + "k"); a.push("-f", AUDIO_OUT[fmt][1]); }
     else {
       let vc = o.vcodec || "auto", ac = o.acodec || "auto";
+      if (vc === "smart" || ac === "smart") {
+        const info = probe(input), mp4ish = fmt === "mp4" || fmt === "mov" || fmt === "mkv";
+        const changes0 = (o.height && o.height !== "orig") || (o.fps && o.fps !== "orig");
+        if (vc === "smart") vc = mp4ish && !changes0 && /^(h264|hevc)$/.test(info.v) ? "copy" : "auto";
+        if (ac === "smart") ac = mp4ish && /^(aac|mp3)$/.test(info.a) || (fmt === "mkv" && info.a) ? "copy" : "auto";
+        if (vc === "copy" && info.v === "hevc" && fmt !== "mkv") o = { ...o, hvc1: true };
+      }
       if (vc === "auto") vc = fmt === "webm" ? "vp9" : fmt === "avi" ? "mpeg4" : "h264";
       if (fmt === "webm" && vc !== "vp9" ) vc = "vp9"; if (fmt === "avi" && (vc === "vp9" || vc === "hevc")) vc = "mpeg4";
       if (ac === "auto") ac = fmt === "webm" ? "opus" : fmt === "avi" ? "mp3" : "aac";
@@ -591,7 +702,7 @@ exports.init = function init(ctx) {
       const changes = (o.height && o.height !== "orig") || (o.fps && o.fps !== "orig");
       if (vc === "copy" && changes) vc = "h264";
       a.push("-map", "0:v:0?", "-map", "0:a:0?");
-      if (vc === "copy") a.push("-c:v", "copy");
+      if (vc === "copy") { a.push("-c:v", "copy"); if (o.hvc1) a.push("-tag:v", "hvc1"); }
       else {
         a.push("-c:v", VCODEC[vc], "-pix_fmt", "yuv420p");
         if (o.vbitrate) a.push("-b:v", o.vbitrate + "k"); else { const q = CRF[vc][{ high: 0, medium: 1, low: 2 }[o.quality || "high"]]; if (vc === "mpeg4") a.push("-q:v", String(q)); else a.push("-crf", String(q)); if (vc === "vp9") a.push("-b:v", "0"); }
@@ -655,5 +766,5 @@ exports.init = function init(ctx) {
   H("convStop", async ({ id }) => { const r = running.get(id); if (r) r.stop(); else { const c = st.conv.find((x) => x.id === id); if (c && c.state === "queued") { c.state = "canceled"; pushConv(); } } return {}; });
   H("convRemove", async ({ id }) => { const r = running.get(id); if (r) r.stop(); st.conv = st.conv.filter((x) => x.id !== id); pushConv(); return {}; });
   H("updateExtractor", async () => { if (!ytPath()) return { error: "The extractor isn't installed" }; const r = await runYt(["-U"], 120000); return { text: (r.out + r.err).trim().split("\n").pop() }; });
-  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
+  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { megaItems, parseMega, itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
 };

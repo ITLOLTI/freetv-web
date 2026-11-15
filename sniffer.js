@@ -94,8 +94,8 @@ async function snDetail(it) {
       (it.description ? '<div class="small sn-desc">' + esc(it.description) + "</div>" : "") +
       '<div class="row" style="margin:12px 0 6px;gap:8px">' + (it.needsFormats ? "" : it.previewUrl && !it.drm ? '<button class="btn white" id="snprev">' + I.play + tr("Preview") + "</button>" : "") + "</div>" +
       (it.needsFormats ? '<div class="spinner"></div>' : blocked ? '<div class="sn-note glass">' + esc(blocked) + "</div>" :
-        it.formats.length ? '<div class="small dim" style="margin:8px 0 6px">' + tr("Choose a quality to download") + '</div><div class="list">' + it.formats.map((f, i) => '<button class="item" data-f="' + i + '"><span style="flex:1;text-align:left">' + esc(tr(f.label)) +
-          (f.note ? ' <span class="dim small">' + esc(f.note) + "</span>" : "") + '</span><span class="dim small">' + esc([(f.audio || f.ext || "").toUpperCase(), (f.size ? "~" : "") + snSize(f.size)].filter(Boolean).join(" · ")) + "</span>" + I.dl + "</button>").join("") + "</div>" :
+        it.formats.length ? '<div class="small dim" style="margin:8px 0 6px">' + tr("Choose a quality to download") + '</div><div class="list">' + it.formats.map((f, i) => '<button class="item" data-f="' + i + '"><span style="flex:1;text-align:left">' + esc(/^Original file · /.test(f.label) ? tr("Original file · MKV").replace("MKV", f.label.split("· ")[1]) : tr(f.label)) +
+          (f.note ? ' <span class="dim small">' + esc(f.note) + "</span>" : "") + '</span><span class="dim small">' + esc([(f.out || f.audio || f.ext || "").toUpperCase(), (f.size ? "~" : "") + snSize(f.size)].filter(Boolean).join(" · ")) + "</span>" + I.dl + "</button>").join("") + "</div>" :
           '<div class="sn-note glass">' + tr("Nothing downloadable was found for this item.") + "</div>") + "</div>");
     const p = $("#snprev"); if (p) p.onclick = () => snPreview(it);
     $$("#sheet [data-f]").forEach((b) => b.onclick = async () => { if (await snQueue(it, it.formats[+b.dataset.f])) closeSheet(); });
@@ -199,7 +199,7 @@ function snBrowsePanel() {
         esc([it.duration ? fmtTime(it.duration) : "", it.site].filter(Boolean).join(" · ")) + "</div></div>" + (it.previewUrl && !it.drm && !it.needsFormats ? '<button class="sn-nb" data-bp="' + i + '" title="' + tr("Preview") + '">▶</button>' : "") + "</div>" +
       (it.drm ? '<div class="sn-q bad">' + tr("Protected (DRM)") + " – " + tr("can't be downloaded") + "</div>" : it.live ? '<div class="sn-q">' + tr("Live · preview only") + "</div>" :
         it.needsFormats ? '<button class="sn-q" data-bn="' + i + '"><span>' + tr("Show qualities") + "</span></button>" :
-        it.formats.map((f, k) => '<button class="sn-q" data-bi="' + i + '" data-bf="' + k + '"><span>' + esc(tr(f.label)) + '</span><small>' + esc([(f.audio || f.ext || "").toUpperCase(), (f.size ? "~" : "") + snSize(f.size)].filter(Boolean).join(" · ")) + " ⬇</small></button>").join("")) + "</div>").join("");
+        it.formats.map((f, k) => '<button class="sn-q" data-bi="' + i + '" data-bf="' + k + '"><span>' + esc(tr(f.label)) + '</span><small>' + esc([(f.out || f.audio || f.ext || "").toUpperCase(), (f.size ? "~" : "") + snSize(f.size)].filter(Boolean).join(" · ")) + " ⬇</small></button>").join("")) + "</div>").join("");
   $("#bclose").onclick = () => { SN.bopen = false; snBrowsePanel(); };
   $("#bref").onclick = () => { SN.bres = null; snBrowseLoad(); };
   $$("[data-bf]", p).forEach((x) => x.onclick = async () => { const it = r.items[+x.dataset.bi]; if (await snQueue(it, it.formats[+x.dataset.bf])) { const sm = x.querySelector("small"); if (sm) sm.textContent = "✓ " + tr("Added to downloads"); } });
