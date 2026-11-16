@@ -212,10 +212,11 @@ function snBrowsePanel() {
 const snSel = (id, vals, cur) => '<select id="' + id + '">' + vals.map((x) => { const [val, l] = Array.isArray(x) ? x : [x, x]; return '<option value="' + val + '"' + (String(val) === String(cur) ? " selected" : "") + ">" + esc(tr(String(l))) + "</option>"; }).join("") + "</select>";
 function snDownloads(b) {
   b.innerHTML = '<div class="row sn-sub sn-tools"><label>' + tr("At the same time") + " " + snSel("snmax", [1, 2, 3, 4, 5, 6], SN.settings.maxActive) + "</label><label>" + tr("Connections per download") + " " + snSel("sncon", [1, 2, 4, 6, 8, 12], SN.settings.connections) +
-    '</label><span class="sp"></span><button class="btn" id="snupd">' + tr("Update extractor") + '</button><button class="btn" id="snfolder">' + tr("Open folder") + '</button><button class="btn" id="snclear">' + tr("Clear finished") + '</button></div>' +
+    '</label><label class="sn-check"><input type="checkbox" id="snapple" ' + (SN.settings.apple !== false ? "checked" : "") + "> " + tr("Make videos play on Mac (QuickTime)") + '</label><span class="sp"></span><button class="btn" id="snupd">' + tr("Update extractor") + '</button><button class="btn" id="snfolder">' + tr("Open folder") + '</button><button class="btn" id="snclear">' + tr("Clear finished") + '</button></div>' +
     '<div class="small dim" style="margin-bottom:10px">' + esc(DCFG ? DCFG.folder + "/Web" : "") + ' · <a href="#" id="snchg">' + tr("Change folder") + '</a></div><div id="snlist"></div>';
   const setS = async () => { const s = await snCall("settings", { maxActive: +$("#snmax").value, connections: +$("#sncon").value }); if (s && !s.error) SN.settings = s; };
   $("#snmax").onchange = setS; $("#sncon").onchange = setS;
+  $("#snapple").onchange = async (e) => { const s = await snCall("settings", { apple: e.target.checked }); if (s && !s.error) SN.settings = s; };
   $("#snfolder").onclick = () => DESK.open(DCFG.folder + "/Web").then((e) => { if (e) DESK.open(); });
   $("#snclear").onclick = () => snCall("clear");
   $("#snchg").onclick = async (e) => { e.preventDefault(); DCFG.folder = await DESK.chooseFolder(); snDownloads(b); };
@@ -230,9 +231,9 @@ function snDrawJobs() {
   const btn = (a, l, j, cls) => '<button class="btn ' + (cls || "") + '" data-sa="' + a + '" data-sj="' + j.id + '">' + l + "</button>";
   const row = (j) => {
     const pct = j.total ? Math.min(100, Math.round(j.size / j.total * 100)) : 0, active = j.state === "downloading";
-    const info = j.state === "done" ? [snSize(j.size), j.label, j.site].filter(Boolean).join(" · ") :
+    const info = j.state === "done" ? [snSize(j.size), j.label, j.site, j.converted === "hevc" ? tr("HEVC for Mac") : "", tr(j.note || "")].filter(Boolean).join(" · ") :
       [j.state === "queued" ? tr("Waiting") : j.state === "paused" ? tr("Paused") : j.state === "failed" ? tr("Failed") : j.state === "canceled" ? tr("Cancelled") : "", j.total ? pct + "%" : "", snSize(j.size) + (j.total ? " / " + snSize(j.total) : ""),
-        active && j.speed ? snSize(j.speed) + "/s" : "", active && j.eta ? snEta(j.eta) + " " + tr("left") : "", j.label, tr(j.error || "")].filter(Boolean).join(" · ");
+        active && j.phase ? tr(j.phase) + " " + Math.round((j.phaseProgress || 0) * 100) + "%" : "", active && j.speed && !j.phase ? snSize(j.speed) + "/s" : "", active && j.eta ? snEta(j.eta) + " " + tr("left") : "", j.label, tr(j.error || "")].filter(Boolean).join(" · ");
     return '<div class="item sn-job"><div class="sn-jth">' + (j.thumbnail ? '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(j.thumbnail) + '" onerror="this.remove()">' : "") + '</div><div class="sn-jmain"><div class="sn-jt">' + esc(j.title) + '</div><div class="small ' + (j.state === "failed" ? "" : "dim") + '"' + (j.state === "failed" ? ' style="color:var(--bad)"' : "") + ">" + esc(info) + "</div>" +
       (j.state !== "done" && j.state !== "canceled" ? '<div class="prog sn-prog' + (active && !j.total ? " ind" : "") + '"><i style="width:' + pct + '%"></i></div>' : "") + '</div><div class="row sn-jbtn">' +
       (j.state === "done" ? btn("play", tr("Play"), j) + btn("conv", tr("Convert"), j) + btn("show", tr("Show in Finder"), j) : "") +

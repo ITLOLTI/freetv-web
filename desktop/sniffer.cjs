@@ -19,8 +19,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 exports.init = function init(ctx) {
   const { app, ipcMain, dialog } = ctx;
   const stateFile = () => path.join(app.getPath("userData"), "freetv-sniffer.json");
-  const st = { jobs: [], conv: [], settings: { maxActive: 3, connections: 6 } };
+  const st = { jobs: [], conv: [], settings: { maxActive: 3, connections: 6, apple: true } };
   try { Object.assign(st, JSON.parse(fs.readFileSync(stateFile(), "utf8"))); } catch (e) {}
+  if (st.settings.apple === undefined) st.settings.apple = true;
   st.jobs.forEach((j) => { if (j.state === "downloading" || j.state === "queued") j.state = "paused"; j.speed = 0; });
   st.conv.forEach((c) => { if (c.state === "converting" || c.state === "queued") { c.state = "failed"; c.error = "FreeTV was closed"; } });
   let saveT = 0;
@@ -540,6 +541,7 @@ exports.init = function init(ctx) {
     try {
       if (j.engine === "mega") { const r = await megaUrl(j); j.url = r.g; if (r.s) j.total = r.s; }
       await (j.engine === "direct" || j.engine === "mega" ? runDirect(j) : j.engine === "ytdlp" ? runYtJob(j) : runFfmpegJob(j));
+      if (!j.audio && j.engine !== "mega") { await makeAppleFriendly(j); if (j.want) throw new Error("stopped"); }
       try { j.size = j.total = fs.statSync(j.file).size; } catch (e) {}
       Object.assign(j, { state: "done", speed: 0, eta: 0, ended: Date.now(), parts: undefined });
       if (j.after === "mp4") addConvert({ inputs: [j.file], opts: { format: "mp4", vcodec: "smart", acodec: "smart", quality: "high", abitrate: 192 } });
@@ -713,14 +715,51 @@ exports.init = function init(ctx) {
     try { const r = require("node:child_process").spawnSync(ctx.ffmpegPath(), ["-hide_banner", "-i", file], { encoding: "utf8", timeout: 20000 }); const t = r.stderr || "";
       const vl = (/Stream #[^\n]*Video: [^\n]*/.exec(t) || [""])[0];
       let v = ((/Video: (\w+)/.exec(vl) || [])[1] || "").toLowerCase();
-      if (v === "h264" && !/yuv420p[, ]|yuvj420p|nv12/.test(vl)) v = "h264x";            // 4:4:4 / 10-bit H.264 won't play on Apple devices: re-encode
-      if (v === "hevc" && !/yuv420p(10le)?[, ]/.test(vl)) v = "hevcx";
+      if (v === "h264" && !/yuvj?420p(?![\w])|nv12/.test(vl)) v = "h264x";            // 4:4:4 / 10-bit H.264 won't play on Apple devices: re-encode
+      if (v === "hevc" && !/yuv420p(10le)?(?![\w])/.test(vl)) v = "hevcx";
       if (/attached pic/.test(vl)) v = "";                                               // cover art in audio files isn't a video
-      const d = /Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(t), wh = /, (\d{2,5})x(\d{2,5})[, ]/.exec(vl);
+      const d = /Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(t), wh = /, (\d{2,5})x(\d{2,5})[, ]/.exec(vl), br = /bitrate: (\d+) kb\/s/.exec(t);
       return { v, a: ((/Stream #[^\n]*Audio: (\w+)/.exec(t) || [])[1] || "").toLowerCase(), subs: (t.match(/Stream #[^\n]*Subtitle:/g) || []).length,
-        duration: d ? +d[1] * 3600 + +d[2] * 60 + +d[3] : 0, width: wh ? +wh[1] : 0, height: wh ? +wh[2] : 0 }; } catch (e) { return { v: "", a: "", subs: 0, duration: 0, width: 0, height: 0 }; }
+        duration: d ? +d[1] * 3600 + +d[2] * 60 + +d[3] : 0, width: wh ? +wh[1] : 0, height: wh ? +wh[2] : 0, kbps: br ? +br[1] : 0, tenbit: /10le|p010/.test(vl) }; } catch (e) { return { v: "", a: "", subs: 0, duration: 0, width: 0, height: 0, kbps: 0, tenbit: false }; }
   }
   const secs = (t) => { if (t === undefined || t === null || t === "") return null; const p = String(t).trim().split(":").map(Number); if (p.some(isNaN)) return null; return p.reduce((a, x) => a * 60 + x, 0); };
+  function appleVideoArgs(info) {
+    const vt = caps().has("hevc_videotoolbox"), h = info.height || 1080;
+    const floor = h >= 2000 ? 24000 : h >= 1400 ? 14000 : h >= 1000 ? 8000 : h >= 700 ? 4500 : 2500;
+    const kb = Math.min(80000, Math.max(floor, Math.round((info.kbps || 0) * 1.4)));
+    const a = vt ? ["-c:v", "hevc_videotoolbox", "-allow_sw", "1", "-b:v", kb + "k", "-maxrate", Math.round(kb * 1.5) + "k", "-bufsize", kb * 2 + "k"] : ["-c:v", "libx265", "-preset", "fast", "-crf", "20", "-x265-params", "log-level=error"];
+    a.push("-pix_fmt", info.tenbit ? (vt ? "p010le" : "yuv420p10le") : "yuv420p");
+    if (info.tenbit && vt) a.push("-profile:v", "main10");
+    a.push("-tag:v", "hvc1");
+    return a;
+  }
+  // QuickTime / Finder / iPhone play H.264 and HEVC video with AAC/MP3/AC3 sound. Anything else gets fixed after download.
+  const appleOk = (info) => (!info.v || /^(h264|hevc|mjpeg|prores)$/.test(info.v)) && (!info.a || /^(aac|mp3|alac|ac3|eac3)$/.test(info.a));
+  function makeAppleFriendly(j) {
+    return new Promise((resolve) => {
+      if (!st.settings.apple || !/\.(mp4|m4v|mov|mkv|webm)$/i.test(j.file) || !fs.existsSync(j.file)) return resolve();
+      const info = probe(j.file); if (appleOk(info)) return resolve();
+      const out = j.file.replace(/\.(mkv|webm|mov|m4v)$/i, ".mp4"), tmp = out + ".mac.part";
+      const okV = !info.v || /^(h264|hevc)$/.test(info.v);
+      const args = ["-hide_banner", "-nostdin", "-y", "-i", j.file, "-map", "0:v:0?", "-map", "0:a:0?",
+        ...(okV ? ["-c:v", "copy", ...(info.v === "hevc" ? ["-tag:v", "hvc1"] : [])] : appleVideoArgs(info)),
+        ...(info.a && !/^(aac|mp3|alac|ac3|eac3)$/.test(info.a) ? ["-c:a", "aac", "-b:a", "192k"] : ["-c:a", "copy"]),
+        "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:1", "-nostats", tmp];
+      j.phase = "Making it play on Mac"; j.phaseProgress = 0; pushJobs();
+      const p = spawn(ctx.ffmpegPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
+      running.set(j.id, { stop: () => { try { p.kill("SIGKILL"); } catch (e) {} } });
+      let err = "";
+      p.stderr.on("data", (d) => { err = (err + d).slice(-3000); });
+      p.stdout.on("data", (d) => { const m = [...String(d).matchAll(/out_time_(?:us|ms)=(\d+)/g)].pop(); if (m && info.duration) j.phaseProgress = Math.min(0.999, +m[1] / 1e6 / info.duration); });
+      p.on("close", (code) => {
+        running.delete(j.id); j.phase = ""; j.phaseProgress = 0;
+        if (code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 0) { try { if (out !== j.file) fs.unlinkSync(j.file); fs.renameSync(tmp, out); j.file = out; j.converted = okV ? "audio" : "hevc"; } catch (e) {} }
+        else { try { fs.unlinkSync(tmp); } catch (e) {} if (!j.want) j.note = "Kept the original: it may not play in QuickTime. " + ((err.split("\n").filter((l) => /error|invalid/i.test(l)).pop() || "").slice(0, 120)); }
+        resolve();
+      });
+      p.on("error", () => { running.delete(j.id); j.phase = ""; resolve(); });
+    });
+  }
   function convArgs(input, output, o, info) {
     const fmt = o.format, F = FORMATS[fmt]; if (!F) throw new Error("Unknown format");
     info = info || probe(input);
@@ -750,9 +789,9 @@ exports.init = function init(ctx) {
       let vc = o.vcodec || "smart", ac = o.mute ? "none" : (o.acodec || "smart");
       const changes = (o.height && o.height !== "orig") || (o.fps && o.fps !== "orig") || !!o.targetMB || !!o.vbitrate || start != null || end != null;
       const vcopyOk = !changes && (F.anyCopy ? !!info.v && !/x$/.test(info.v) : F.okV.includes(info.v) && ["h264", "hevc"].includes(info.v));
-      if (vc === "smart") vc = vcopyOk ? "copy" : "auto";
+      if (vc === "smart") vc = vcopyOk ? "copy" : (["mp4", "mov", "m4v"].includes(fmt) && (info.height > 1080 || info.tenbit) ? "apple" : "auto");
       if (vc === "copy" && !vcopyOk) vc = "auto";
-      if (vc === "auto" || (vc !== "copy" && (!F.okV.includes(vc) || !hasV(vc)))) vc = F.vc;
+      if (vc === "auto" || (vc !== "copy" && vc !== "apple" && (!F.okV.includes(vc) || !hasV(vc)))) vc = F.vc;
       const aname = { aac: "aac", mp3: "mp3", opus: "opus", vorbis: "vorbis", flac: "flac", ac3: "ac3", mp2: "mp2", wmav2: "wma" }[info.a] || "";
       const acopyOk = !!info.a && (F.anyCopy || F.okA.includes(aname)) && start == null;
       if (ac === "smart") ac = acopyOk ? "copy" : "auto";
@@ -761,6 +800,7 @@ exports.init = function init(ctx) {
       a.push("-map", "0:v:0");
       if (ac !== "none" && info.a) a.push("-map", "0:a:0");
       if (vc === "copy") { a.push("-c:v", "copy"); if (info.v === "hevc" && (F.f === "mp4" || F.f === "mov")) a.push("-tag:v", "hvc1"); }
+      else if (vc === "apple") { a.push(...appleVideoArgs(info)); const vf = scale(o.height); if (vf) a.push("-vf", vf); if (o.fps && o.fps !== "orig") a.push("-r", String(+o.fps)); }
       else {
         a.push("-c:v", VENC[vc]);
         if (vc === "prores") a.push("-profile:v", { high: "3", medium: "2", low: "1" }[o.quality || "high"], "-pix_fmt", "yuv422p10le");
@@ -834,7 +874,7 @@ exports.init = function init(ctx) {
   H("remove", async ({ id, deleteFile }) => { const j = job(id); if (!j) return {}; const r = running.get(id); if (r) { j.want = "cancel"; r.stop(); } cleanup(j); if (deleteFile) try { fs.unlinkSync(j.file); } catch (e) {}
     st.jobs = st.jobs.filter((x) => x.id !== id); pushJobs(); return {}; });
   H("clear", async () => { st.jobs = st.jobs.filter((j) => !["done", "canceled", "failed"].includes(j.state)); pushJobs(); return {}; });
-  H("settings", async (s) => { if (s.maxActive) st.settings.maxActive = Math.max(1, Math.min(6, +s.maxActive)); if (s.connections) st.settings.connections = Math.max(1, Math.min(12, +s.connections)); save(); pump(); return st.settings; });
+  H("settings", async (s) => { if (typeof s.apple === "boolean") st.settings.apple = s.apple; if (s.maxActive) st.settings.maxActive = Math.max(1, Math.min(6, +s.maxActive)); if (s.connections) st.settings.connections = Math.max(1, Math.min(12, +s.connections)); save(); pump(); return st.settings; });
   H("pickFiles", async () => { const r = await dialog.showOpenDialog(ctx.getWin(), { title: "Choose media files to convert", defaultPath: ctx.getFolder(), properties: ["openFile", "multiSelections"],
     filters: [{ name: "Media", extensions: ["mp4", "mkv", "mov", "avi", "webm", "ts", "mts", "m2ts", "m4v", "flv", "wmv", "mpg", "mpeg", "3gp", "ogv", "vob", "mxf", "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff", "aif", "wma", "ac3", "amr", "gif"] }, { name: "All files", extensions: ["*"] }] }); return { files: r.canceled ? [] : r.filePaths }; });
   H("convert", async (o) => ({ added: addConvert(o) }));
@@ -843,5 +883,5 @@ exports.init = function init(ctx) {
   H("convStop", async ({ id }) => { const r = running.get(id); if (r) r.stop(); else { const c = st.conv.find((x) => x.id === id); if (c && c.state === "queued") { c.state = "canceled"; pushConv(); } } return {}; });
   H("convRemove", async ({ id }) => { const r = running.get(id); if (r) r.stop(); st.conv = st.conv.filter((x) => x.id !== id); pushConv(); return {}; });
   H("updateExtractor", async () => { if (!ytPath()) return { error: "The extractor isn't installed" }; const r = await runYt(["-U"], 120000); return { text: (r.out + r.err).trim().split("\n").pop() }; });
-  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { probe, formatsAvailable, megaItems, parseMega, itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
+  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { makeAppleFriendly, probe, formatsAvailable, megaItems, parseMega, itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
 };

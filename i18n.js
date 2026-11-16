@@ -1,5 +1,8 @@
 // English → Albanian (Shqip). Missing entries fall back to English.
 const SQ = {
+  "Make videos play on Mac (QuickTime)": "Bëji videot të luhen në Mac (QuickTime)",
+  "Making it play on Mac": "Duke e përgatitur për Mac",
+  "HEVC for Mac": "HEVC për Mac",
   "High": "E lartë",
   "This file has no sound to convert.": "Ky skedar nuk ka zë për ta konvertuar.",
   "This file has no subtitles to extract.": "Ky skedar nuk ka titra për t'i nxjerrë.",
