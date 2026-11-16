@@ -18,7 +18,7 @@ async function snInit() {
     if (e.type === "toast") toast(e.msg);
     if (e.type === "bnav") snBrowseNav(e);
     if (e.type === "bclick" && S.tab === "sniffer" && SN.view === "browse") { SN.bres = null; snBrowseLoad(); }
-    if (e.type === "conv") { SN.conv = e.conv; if (snVisible() && SN.view === "convert") snDrawConv(); }
+    if (e.type === "conv") { SN.conv = e.conv; if (cvVisible()) { snDrawConv(); if (e.conv.some((c) => c.state === "done") && $("#cvrecent")) cvDrawFiles(); } }
   });
   const s = await snCall("state"); if (s && !s.error) { SN.jobs = s.jobs; SN.conv = s.conv; SN.settings = s.settings; SN.extractor = s.extractor; }
   if (snVisible()) renderSniffer($("#view"));
@@ -29,10 +29,11 @@ function renderSniffer(v) {
   snInit();
   const act = SN.jobs.filter((j) => j.state === "downloading" || j.state === "queued").length;
   v.innerHTML = '<div class="sn"><div class="row"><h1>' + tr("Web Sniffer") + '</h1><span class="sp"></span><div class="seg sn-seg">' +
-    [["discover", "Discover"], ["browse", "Browse"], ["downloads", "Downloads"], ["convert", "Converter"]].map(([k, l]) => '<button data-snv="' + k + '" class="' + (SN.view === k ? "on" : "") + '">' + tr(l) +
+    [["discover", "Discover"], ["browse", "Browse"], ["downloads", "Downloads"]].map(([k, l]) => '<button data-snv="' + k + '" class="' + (SN.view === k ? "on" : "") + '">' + tr(l) +
       (k === "downloads" ? ' <b id="snbadge" class="sn-badge" style="' + (act ? "" : "display:none") + '">' + act + "</b>" : "") + "</button>").join("") + '</div></div><div id="snbody"></div></div>';
   $$("[data-snv]", v).forEach((b) => b.onclick = () => { SN.view = b.dataset.snv; renderSniffer(v); });
-  ({ discover: snDiscover, browse: snBrowse, downloads: snDownloads, convert: snConvert })[SN.view]($("#snbody"));
+  if (SN.view === "convert") SN.view = "discover";
+  ({ discover: snDiscover, browse: snBrowse, downloads: snDownloads })[SN.view]($("#snbody"));
 }
 
 // ------------------------------------------------------------------ Discover
@@ -246,7 +247,7 @@ function snJobClick(e) {
   if (a === "pause" || a === "resume" || a === "cancel") snCall(a, { id: j.id });
   if (a === "show") DESK.show(j.file);
   if (a === "play") openPlayer({ kind: "movie", key: "f:" + j.id, title: j.title, url: location.origin + "/local?p=" + encodeURIComponent(j.file), localFile: j.file, group: tr("Web Sniffer") });
-  if (a === "conv") { SN.picked = new Set([j.file]); SN.view = "convert"; renderSniffer($("#view")); }
+  if (a === "conv") { cvAdd([j.file]); go("convert"); }
   if (a === "del") {
     if (j.state !== "done") return snCall("remove", { id: j.id, deleteFile: false });
     sheet("<h3>" + esc(j.title) + '</h3><div class="list"><button class="item" id="dkeep">' + tr("Remove from list (keep the file)") + '</button><button class="item" id="dboth" style="color:var(--bad)">' + tr("Delete the file too") + "</button></div>");
@@ -255,48 +256,118 @@ function snJobClick(e) {
   }
 }
 
-// ------------------------------------------------------------------ Converter
+// ------------------------------------------------------------------ Converter (its own tab in the side menu)
+const CV_FORMATS = {
+  video: [["mp4", "MP4", "Plays everywhere"], ["mov", "MOV", "Apple, QuickTime"], ["mkv", "MKV", "Keeps every track"], ["avi", "AVI", "Older players"], ["webm", "WebM", "For websites"], ["m4v", "M4V", "Apple TV, iTunes"],
+    ["wmv", "WMV", "Windows"], ["flv", "FLV", "Flash, old sites"], ["mpg", "MPEG", "DVD players"], ["ts", "TS", "TV streams"], ["3gp", "3GP", "Old phones"], ["ogv", "OGV", "Open format"], ["prores", "ProRes", "Video editing"]],
+  audio: [["mp3", "MP3", "Plays everywhere"], ["m4a", "M4A", "Apple Music"], ["aac", "AAC", "Small, good sound"], ["wav", "WAV", "Uncompressed"], ["flac", "FLAC", "Lossless"], ["aiff", "AIFF", "Uncompressed, Apple"],
+    ["ogg", "OGG", "Open format"], ["opus", "Opus", "Smallest files"], ["wma", "WMA", "Windows"], ["ac3", "AC3", "Dolby Digital"]],
+  image: [["gif", "GIF", "Short animation"], ["webp", "WebP", "Smaller animation"], ["jpg", "JPG", "One photo from the video"], ["png", "PNG", "Photos every few seconds"]],
+  subs: [["srt", "SRT", "Subtitles from the video"]],
+};
+const CV_KIND = Object.fromEntries(Object.entries(CV_FORMATS).flatMap(([k, l]) => l.map(([f]) => [f, k])));
+const CV_PRESETS = [["Apple devices", { format: "mp4", vcodec: "smart", acodec: "smart", quality: "high" }], ["Small file to send", { format: "mp4", vcodec: "h264", quality: "medium", height: "720", targetMB: 25 }],
+  ["Music MP3", { format: "mp3", abitrate: 320 }], ["Short GIF", { format: "gif", start: "", end: "5", fps: "12", height: "orig" }], ["For the web", { format: "webm", quality: "medium" }], ["For editing", { format: "prores", quality: "high" }]];
+const CV = { cat: "video", files: [], picked: new Set(), info: {}, caps: null, o: { format: "mp4", vcodec: "smart", acodec: "smart", quality: "high", height: "orig", fps: "orig", vbitrate: "", abitrate: 192, targetMB: "", start: "", end: "", mute: false, every: 10, subIndex: 1 } };
+const cvVisible = () => S.tab === "convert" && $("#player").classList.contains("hidden");
+function cvAdd(files) { for (const f of files) { if (!f) continue; if (!CV.files.includes(f)) CV.files.unshift(f); CV.picked.add(f); cvProbe(f); } }
+async function cvProbe(f) { if (CV.info[f]) return; CV.info[f] = { loading: true }; const r = await snCall("probe", { file: f }); CV.info[f] = r && !r.error ? r : {}; if (cvVisible()) cvDrawFiles(); }
 function snSources() {
-  const a = SN.jobs.filter((j) => j.state === "done").map((j) => ({ file: j.file, name: j.title, from: "Web" }));
+  const a = SN.jobs.filter((j) => j.state === "done").map((j) => ({ file: j.file, name: j.title, from: "Web Sniffer" }));
   const b = (typeof JOBS !== "undefined" ? JOBS : []).filter((j) => j.state === "done" && j.file).map((j) => ({ file: j.file, name: j.name + (j.title ? " – " + j.title : ""), from: j.type === "record" ? "Recording" : "Download" }));
-  const c = SN.extra.map((f) => ({ file: f, name: f.split("/").pop(), from: "File" }));
-  const seen = new Set(); return [...c, ...a, ...b].filter((s) => !seen.has(s.file) && seen.add(s.file));
+  const c = SN.conv.filter((x) => x.state === "done" && !x.count).map((x) => ({ file: x.file, name: x.file.split("/").pop(), from: "Converted" }));
+  const seen = new Set(CV.files); return [...a, ...b, ...c].filter((x) => !seen.has(x.file) && seen.add(x.file)).slice(0, 30);
 }
-function snConvert(b) {
-  const o = SN.opts, audio = SN_AUDIO.includes(o.format), src = snSources();
-  const field = (l, h) => '<label class="sn-field"><span>' + tr(l) + "</span>" + h + "</label>";
-  b.innerHTML = '<div class="sn-conv"><div class="sn-col"><div class="row"><h2 style="margin:0">' + tr("Files") + '</h2><span class="sp"></span><button class="btn" id="snadd">+ ' + tr("Add files…") + "</button></div>" +
-    (src.length ? '<div class="list sn-src">' + src.map((s, i) => '<label class="item"><input type="checkbox" data-src="' + i + '" ' + (SN.picked.has(s.file) ? "checked" : "") + '><span style="flex:1;min-width:0"><div class="sn-jt">' + esc(s.name) + '</div><div class="small dim">' + tr(s.from) + " · " + esc((s.file.split(".").pop() || "").toUpperCase()) + "</div></span></label>").join("") + "</div>" :
-      '<div class="small dim" style="margin-top:10px">' + tr("Finished downloads and recordings appear here. You can also add any media file from your Mac.") + "</div>") + "</div>" +
-    '<div class="sn-col"><h2 style="margin:0 0 10px">' + tr("Output") + '</h2><div class="glass sn-form">' +
-    field("Format", snSel("so_format", [["mp4", "MP4"], ["mov", "MOV"], ["mkv", "MKV"], ["avi", "AVI"], ["webm", "WebM"], ["mp3", "MP3 (audio)"], ["m4a", "M4A (audio)"], ["aac", "AAC (audio)"], ["wav", "WAV (audio)"], ["flac", "FLAC (audio)"]], o.format)) +
-    (audio ? "" : field("Resolution", snSel("so_height", [["orig", "Same as source"], [2160, "4K (2160p)"], [1440, "1440p"], [1080, "1080p"], [720, "720p"], [480, "480p"], [360, "360p"]], o.height)) +
-      field("Video codec", snSel("so_vcodec", [["auto", "Automatic"], ["copy", "Keep original (no quality loss, fastest)"], ["h264", "H.264"], ["hevc", "HEVC (H.265)"], ["vp9", "VP9"], ["mpeg4", "MPEG-4"]], o.vcodec)) +
-      field("Quality", snSel("so_quality", [["high", "High (near original)"], ["medium", "Medium"], ["low", "Small file"]], o.quality)) +
-      field("Video bitrate", snSel("so_vbitrate", [["", "Automatic (by quality)"], [1500, "1.5 Mbps"], [3000, "3 Mbps"], [5000, "5 Mbps"], [8000, "8 Mbps"], [12000, "12 Mbps"], [20000, "20 Mbps"]], o.vbitrate)) +
-      field("Frame rate", snSel("so_fps", [["orig", "Same as source"], [24, "24"], [25, "25"], [30, "30"], [50, "50"], [60, "60"]], o.fps)) +
-      field("Audio codec", snSel("so_acodec", [["auto", "Automatic"], ["copy", "Keep original"], ["aac", "AAC"], ["mp3", "MP3"], ["opus", "Opus"], ["flac", "FLAC"]], o.acodec))) +
-    (o.format === "wav" || o.format === "flac" ? "" : field("Audio bitrate", snSel("so_abitrate", [[96, "96 kbps"], [128, "128 kbps"], [192, "192 kbps"], [256, "256 kbps"], [320, "320 kbps"]], o.abitrate))) +
-    '</div><button class="btn primary" id="snrun" style="margin-top:12px;width:100%">' + tr("Convert") + (SN.picked.size ? " (" + SN.picked.size + ")" : "") + '</button><div class="small dim" style="margin-top:8px">' + tr("Saved to") + " " + esc(DCFG ? DCFG.folder + "/Converted" : "") + '</div></div></div><div id="sncjobs"></div>';
-  $$("[data-src]", b).forEach((c) => c.onchange = () => { const f = src[+c.dataset.src].file; c.checked ? SN.picked.add(f) : SN.picked.delete(f); $("#snrun").textContent = tr("Convert") + (SN.picked.size ? " (" + SN.picked.size + ")" : ""); });
-  $$("select[id^=so_]", b).forEach((s) => s.onchange = () => { o[s.id.slice(3)] = s.value; if (s.id === "so_format") snConvert(b); });
-  $("#snadd").onclick = async () => { const r = await snCall("pickFiles"); for (const f of (r && r.files) || []) { if (!SN.extra.includes(f)) SN.extra.unshift(f); SN.picked.add(f); } snConvert(b); };
-  $("#snrun").onclick = async () => {
-    const inputs = src.map((s) => s.file).filter((f) => SN.picked.has(f)); if (!inputs.length) return toast("Choose at least one file");
-    await snCall("convert", { inputs, opts: { ...o } }); SN.picked.clear(); toast("Conversion started"); snConvert(b);
-  };
-  $("#sncjobs").onclick = (e) => { const x = e.target.closest("[data-ca]"); if (!x) return; const c = SN.conv.find((y) => y.id === x.dataset.cj); if (!c) return; const a = x.dataset.ca;
-    if (a === "stop") snCall("convStop", { id: c.id }); if (a === "del") snCall("convRemove", { id: c.id }); if (a === "show") DESK.show(c.file);
-    if (a === "play") openPlayer({ kind: "movie", key: "f:" + c.id, title: c.name, url: location.origin + "/local?p=" + encodeURIComponent(c.file), localFile: c.file, group: tr("Converter") }); };
-  snDrawConv();
+async function renderConvert(v) {
+  await snInit();
+  if (!CV.caps) { const r = await snCall("convCaps"); CV.caps = (r && r.formats) || {}; }
+  if (S.tab !== "convert") return;
+  const o = CV.o, kind = CV_KIND[o.format] || "video";
+  const field = (l, h, hint) => '<label class="sn-field"><span>' + tr(l) + (hint ? '<small class="dim"> ' + tr(hint) + "</small>" : "") + "</span>" + h + "</label>";
+  const inp = (id, val, ph, w) => '<input class="cv-in" id="' + id + '" value="' + esc(val == null ? "" : val) + '" placeholder="' + esc(tr(ph)) + '" style="width:' + (w || 110) + 'px">';
+  const settings = kind === "video" ? field("Resolution", snSel("co_height", [["orig", "Same as source"], [2160, "4K (2160p)"], [1440, "1440p"], [1080, "1080p"], [720, "720p"], [480, "480p"], [360, "360p"]], o.height)) +
+      field("Video codec", snSel("co_vcodec", [["smart", "Automatic – keep quality when possible"], ["h264", "H.264"], ["hevc", "HEVC (H.265)"], ["vp9", "VP9"], ["mpeg4", "MPEG-4"], ["prores", "ProRes"]], o.vcodec)) +
+      field("Quality", snSel("co_quality", [["high", "High (near original)"], ["medium", "Medium"], ["low", "Small file"]], o.quality)) +
+      field("Target size", inp("co_targetMB", o.targetMB, "MB", 90), "optional") +
+      field("Video bitrate", snSel("co_vbitrate", [["", "Automatic (by quality)"], [1500, "1.5 Mbps"], [3000, "3 Mbps"], [5000, "5 Mbps"], [8000, "8 Mbps"], [12000, "12 Mbps"], [20000, "20 Mbps"], [40000, "40 Mbps"]], o.vbitrate)) +
+      field("Frame rate", snSel("co_fps", [["orig", "Same as source"], [24, "24"], [25, "25"], [30, "30"], [50, "50"], [60, "60"]], o.fps)) +
+      field("Audio codec", snSel("co_acodec", [["smart", "Automatic – keep quality when possible"], ["aac", "AAC"], ["mp3", "MP3"], ["opus", "Opus"], ["flac", "FLAC"], ["ac3", "AC3"]], o.acodec)) +
+      field("Audio bitrate", snSel("co_abitrate", [[96, "96 kbps"], [128, "128 kbps"], [192, "192 kbps"], [256, "256 kbps"], [320, "320 kbps"]], o.abitrate)) +
+      '<label class="sn-field"><span>' + tr("Remove sound") + '</span><input type="checkbox" id="co_mute" ' + (o.mute ? "checked" : "") + "></label>"
+    : kind === "audio" ? (["wav", "flac", "aiff"].includes(o.format) ? '<div class="small dim" style="padding:10px 0">' + tr("Lossless: the sound is kept exactly.") + "</div>" : field("Audio bitrate", snSel("co_abitrate", [[64, "64 kbps"], [96, "96 kbps"], [128, "128 kbps"], [192, "192 kbps"], [256, "256 kbps"], [320, "320 kbps"]], o.abitrate)))
+    : kind === "image" ? (o.format === "jpg" ? field("Size", snSel("co_height", [["orig", "Same as source"], [1080, "1080p"], [720, "720p"], [480, "480p"]], o.height))
+      : o.format === "png" ? field("One photo every", snSel("co_every", [[1, "1 s"], [2, "2 s"], [5, "5 s"], [10, "10 s"], [30, "30 s"], [60, "1 min"]], o.every)) + field("Size", snSel("co_height", [["orig", "Same as source"], [1080, "1080p"], [720, "720p"], [480, "480p"]], o.height))
+      : field("Size", snSel("co_height", [["orig", "Automatic (480 wide)"], [720, "720p"], [480, "480p"], [360, "360p"], [240, "240p"]], o.height)) + field("Frame rate", snSel("co_fps", [["orig", "Automatic"], [8, "8"], [10, "10"], [12, "12"], [15, "15"], [20, "20"], [25, "25"]], o.fps)) +
+        (o.format === "webp" ? field("Quality", snSel("co_quality", [["high", "High"], ["medium", "Medium"], ["low", "Small file"]], o.quality)) : ""))
+    : field("Subtitle track", snSel("co_subIndex", [1, 2, 3, 4, 5, 6], o.subIndex));
+  const trim = kind === "subs" ? "" : o.format === "jpg" ? '<div class="cv-trim">' + field("Photo at", inp("co_start", o.start, "e.g. 1:30"), "time in the video") + "</div>" : o.format === "png" ? "" :
+    '<div class="cv-trim"><div class="small dim" style="margin:12px 0 4px">' + tr("Cut (optional)") + '</div><div class="row" style="gap:10px">' + inp("co_start", o.start, "From 0:00") + "<span class=\"dim\">→</span>" + inp("co_end", o.end, "To the end") + "</div></div>";
+  v.innerHTML = '<div class="cv"><div class="row"><h1>' + tr("Converter") + '</h1><span class="sp"></span><button class="btn" id="cvopen">' + tr("Open folder") + "</button></div>" +
+    '<div class="cv-grid"><div><div id="cvdrop" class="cv-drop glass"><div class="cv-dicon">' + I.dl + '</div><div><b>' + tr("Drop videos or audio here") + '</b><div class="small dim">' + tr("Or add them from your Mac. Any format works.") + '</div></div><span class="sp"></span><button class="btn primary" id="cvadd">+ ' + tr("Add files…") + "</button></div>" +
+    '<div id="cvfiles"></div><div id="cvrecent"></div></div>' +
+    '<div><div class="seg cv-cats">' + [["video", "Video"], ["audio", "Audio"], ["image", "GIF & photos"], ["subs", "Subtitles"]].map(([k, l]) => '<button data-cvc="' + k + '" class="' + (CV.cat === k ? "on" : "") + '">' + tr(l) + "</button>").join("") + "</div>" +
+    '<div class="cv-formats">' + CV_FORMATS[CV.cat].map(([f, l, d]) => '<button class="cv-fmt' + (o.format === f ? " on" : "") + (CV.caps[f] === false ? " off" : "") + '" data-cvf="' + f + '"' + (CV.caps[f] === false ? " disabled" : "") + "><b>" + l + "</b><small>" + esc(tr(d)) + "</small></button>").join("") + "</div>" +
+    '<div class="small dim" style="margin:14px 0 6px">' + tr("Quick presets") + '</div><div class="cv-presets">' + CV_PRESETS.map(([l], i) => '<button class="chip" data-cvp="' + i + '">' + esc(tr(l)) + "</button>").join("") + "</div>" +
+    '<div class="glass sn-form" style="margin-top:14px">' + settings + trim + "</div>" +
+    '<button class="btn primary" id="cvrun" style="margin-top:14px;width:100%;height:46px;font-size:15px"></button><div class="small dim" style="margin-top:8px">' + tr("Saved to") + " " + esc(DCFG ? DCFG.folder + "/Converted" : "") + "</div></div></div>" +
+    '<div id="sncjobs"></div></div>';
+  $("#cvadd").onclick = async () => { const r = await snCall("pickFiles"); cvAdd((r && r.files) || []); cvDrawFiles(); };
+  $("#cvopen").onclick = () => DESK.open(DCFG.folder + "/Converted").then((e) => { if (e) DESK.open(); });
+  $$("[data-cvc]", v).forEach((b) => b.onclick = () => { CV.cat = b.dataset.cvc; if (CV_KIND[o.format] !== CV.cat) { const first = CV_FORMATS[CV.cat].find(([f]) => CV.caps[f] !== false); if (first) o.format = first[0]; } renderConvert(v); });
+  $$("[data-cvf]", v).forEach((b) => b.onclick = () => { o.format = b.dataset.cvf; if (o.format === "gif" && !o.end) o.end = ""; renderConvert(v); });
+  $$("[data-cvp]", v).forEach((b) => b.onclick = () => { const p = CV_PRESETS[+b.dataset.cvp][1]; Object.assign(o, { vcodec: "smart", acodec: "smart", quality: "high", height: "orig", fps: "orig", vbitrate: "", targetMB: "", mute: false, start: "", end: "" }, p); CV.cat = CV_KIND[o.format]; renderConvert(v); toast(tr(CV_PRESETS[+b.dataset.cvp][0])); });
+  $$("select[id^=co_]", v).forEach((x) => x.onchange = () => { o[x.id.slice(3)] = x.value; if (x.id === "co_targetMB" || x.id === "co_vbitrate") cvRunLabel(); });
+  $$("input.cv-in", v).forEach((x) => x.oninput = () => { o[x.id.slice(3)] = x.value.trim(); });
+  const mute = $("#co_mute"); if (mute) mute.onchange = () => { o.mute = mute.checked; };
+  const drop = $("#cvdrop");
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); }; drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); cvAdd([...e.dataTransfer.files].map((f) => window.ftvDesktop.pathForFile(f))); cvDrawFiles(); };
+  $("#cvrun").onclick = cvRun;
+  $("#sncjobs").onclick = cvJobClick;
+  cvDrawFiles(); snDrawConv(); cvRunLabel();
+}
+function cvRunLabel() { const b = $("#cvrun"); if (!b) return; const n = CV.files.filter((f) => CV.picked.has(f)).length; const l = (CV_FORMATS[CV_KIND[CV.o.format]].find(([f]) => f === CV.o.format) || [, CV.o.format])[1];
+  b.textContent = tr("Convert") + " " + (n > 1 ? n + " " + tr("files") + " " : "") + "→ " + l; b.disabled = !n; }
+function cvDrawFiles() {
+  const box = $("#cvfiles"); if (!box) return;
+  box.innerHTML = CV.files.length ? '<div class="list cv-list">' + CV.files.map((f, i) => { const inf = CV.info[f] || {};
+    const meta = inf.loading ? "…" : [inf.duration ? fmtTime(inf.duration) : "", inf.width ? inf.width + "×" + inf.height : "", inf.v ? inf.v.replace(/x$/, "").toUpperCase() : (inf.a ? tr("Audio") : ""), inf.a && inf.v ? inf.a.toUpperCase() : "", inf.subs ? inf.subs + " " + tr("subtitles") : "", snSize(inf.size)].filter(Boolean).join(" · ");
+    return '<label class="item"><input type="checkbox" data-cvi="' + i + '" ' + (CV.picked.has(f) ? "checked" : "") + '><span style="flex:1;min-width:0"><div class="sn-jt">' + esc(f.split("/").pop()) + '</div><div class="small dim">' + esc(meta) + '</div></span><button class="sn-nb" data-cvx="' + i + '" title="' + tr("Remove") + '">✕</button></label>'; }).join("") + "</div>" : "";
+  $$("[data-cvi]", box).forEach((c) => c.onchange = () => { const f = CV.files[+c.dataset.cvi]; c.checked ? CV.picked.add(f) : CV.picked.delete(f); cvRunLabel(); });
+  $$("[data-cvx]", box).forEach((b) => b.onclick = (e) => { e.preventDefault(); const f = CV.files[+b.dataset.cvx]; CV.files = CV.files.filter((x) => x !== f); CV.picked.delete(f); cvDrawFiles(); });
+  const rec = $("#cvrecent"), src = snSources();
+  if (rec) { rec.innerHTML = src.length ? '<div class="small dim" style="margin:16px 0 8px">' + tr("From FreeTV") + '</div><div class="cv-recent">' + src.map((x, i) => '<button class="chip" data-cvr="' + i + '" title="' + esc(x.file) + '">+ ' + esc(x.name.slice(0, 40)) + ' <span class="dim">' + esc(tr(x.from)) + "</span></button>").join("") + "</div>" : "";
+    $$("[data-cvr]", rec).forEach((b) => b.onclick = () => { cvAdd([src[+b.dataset.cvr].file]); cvDrawFiles(); }); }
+  cvRunLabel();
+}
+async function cvRun() {
+  const inputs = CV.files.filter((f) => CV.picked.has(f)); if (!inputs.length) return toast("Choose at least one file");
+  const o = { ...CV.o }, kind = CV_KIND[o.format]; if (!o.targetMB) delete o.targetMB; if (!o.vbitrate) delete o.vbitrate;
+  if (kind === "subs" || o.format === "png") { delete o.start; delete o.end; }                 // cutting doesn't apply to these
+  if (o.format === "jpg") delete o.end;
+  if (kind !== "video") { delete o.targetMB; delete o.vbitrate; delete o.mute; }
+  const r = await snCall("convert", { inputs, opts: o }); if (r && r.error) return toast(r.error);
+  toast("Conversion started");
+}
+function cvJobClick(e) {
+  const x = e.target.closest("[data-ca]"); if (!x) return; const c = SN.conv.find((y) => y.id === x.dataset.cj); if (!c) return; const a = x.dataset.ca;
+  if (a === "stop") snCall("convStop", { id: c.id }); if (a === "del") snCall("convRemove", { id: c.id }); if (a === "show") DESK.show(c.file);
+  if (a === "again") { cvAdd([c.file]); cvDrawFiles(); }
+  if (a === "play") openPlayer({ kind: "movie", key: "f:" + c.id, title: c.name, url: location.origin + "/local?p=" + encodeURIComponent(c.file), localFile: c.file, group: tr("Converter") });
 }
 function snDrawConv() {
   const box = $("#sncjobs"); if (!box) return;
   if (!SN.conv.length) { box.innerHTML = ""; return; }
   const btn = (a, l, c) => '<button class="btn" data-ca="' + a + '" data-cj="' + c.id + '">' + l + "</button>";
-  box.innerHTML = "<h2>" + tr("Conversions") + '</h2><div class="list">' + SN.conv.map((c) => { const pct = Math.round((c.progress || 0) * 100);
-    const info = [c.state === "converting" ? tr("Converting") + " " + pct + "%" : c.state === "queued" ? tr("Waiting") : c.state === "done" ? snSize(c.size) : c.state === "canceled" ? tr("Cancelled") : tr("Failed"), "→ " + c.opts.format.toUpperCase(), c.error].filter(Boolean).join(" · ");
-    return '<div class="item sn-job"><div class="sn-jmain"><div class="sn-jt">' + esc(c.name) + '</div><div class="small dim"' + (c.state === "failed" ? ' style="color:var(--bad)"' : "") + ">" + esc(info) + "</div>" +
+  const playable = (c) => !c.count && !["jpg", "gif", "webp", "srt"].includes(c.opts.format);
+  box.innerHTML = '<div class="row" style="margin-top:22px"><h2 style="margin:0">' + tr("Conversions") + '</h2></div><div class="list">' + SN.conv.slice(0, 60).map((c) => { const pct = Math.round((c.progress || 0) * 100);
+    const label = (CV_FORMATS[CV_KIND[c.opts.format]] || []).find(([f]) => f === c.opts.format);
+    const info = [c.state === "converting" ? tr("Converting") + " " + pct + "%" : c.state === "queued" ? tr("Waiting") : c.state === "done" ? (c.count ? c.count + " " + tr("photos") + " · " : "") + snSize(c.size) : c.state === "canceled" ? tr("Cancelled") : tr("Failed"),
+      "→ " + (label ? label[1] : c.opts.format.toUpperCase()), c.opts.start || c.opts.end ? tr("cut") + " " + (c.opts.start || "0") + "–" + (c.opts.end || "…") : "", tr(c.error || "")].filter(Boolean).join(" · ");
+    return '<div class="item sn-job"><div class="sn-jmain"><div class="sn-jt">' + esc(c.file.split("/").pop()) + '</div><div class="small dim"' + (c.state === "failed" ? ' style="color:var(--bad)"' : "") + ">" + esc(info) + "</div>" +
       (c.state === "converting" || c.state === "queued" ? '<div class="prog sn-prog"><i style="width:' + pct + '%"></i></div>' : "") + '</div><div class="row sn-jbtn">' +
-      (c.state === "done" ? btn("play", tr("Play"), c) + btn("show", tr("Show in Finder"), c) : "") + (c.state === "converting" || c.state === "queued" ? btn("stop", tr("Cancel"), c) : btn("del", "✕", c)) + "</div></div>"; }).join("") + "</div>";
+      (c.state === "done" ? (playable(c) ? btn("play", tr("Play"), c) : "") + btn("show", tr("Show in Finder"), c) + (c.count ? "" : btn("again", tr("Convert again"), c)) : "") + (c.state === "converting" || c.state === "queued" ? btn("stop", tr("Cancel"), c) : btn("del", "✕", c)) + "</div></div>"; }).join("") + "</div>";
 }
+// files dropped anywhere outside the drop zone must not make the window navigate away
+document.addEventListener("dragover", (e) => { if (window.ftvDesktop) e.preventDefault(); });
+document.addEventListener("drop", (e) => { if (!window.ftvDesktop) return; e.preventDefault(); if (S.tab === "convert" && e.dataTransfer.files.length) { cvAdd([...e.dataTransfer.files].map((f) => window.ftvDesktop.pathForFile(f))); cvDrawFiles(); } });

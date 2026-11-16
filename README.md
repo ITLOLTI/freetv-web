@@ -31,7 +31,7 @@ A separate screen next to the IPTV tabs:
 - **MEGA links** – paste a public mega.nz file or folder link (with its key after `#`). FreeTV downloads and decrypts it like MEGA's website does, and can turn videos into MP4 or MP3 on the way. MEGA's free transfer limits apply.
 - **Browse** – a private browser window inside FreeTV (shares nothing with Safari or Chrome, forgotten when FreeTV quits, pop-ups blocked). Play a video on any page and the *Video found* button lights up; pick a quality to download.
 - **Downloads** – several downloads at once, several connections per file, pause / resume, automatic retry, speed and time left, duplicate warning, history. Files go to `FreeTV/Web`.
-- **Converter** – MP4, MOV, MKV, AVI, WebM, MP3, M4A, AAC, WAV, FLAC with resolution, codecs, bitrate, frame rate and quality; several files in a row. Files go to `FreeTV/Converted`.
+- **Converter** (its own tab since 1.7.0) – drop any video or audio file. Video: MP4, MOV, MKV, AVI, WebM, M4V, WMV, FLV, MPEG, TS, 3GP, OGV, ProRes. Audio: MP3, M4A, AAC, WAV, FLAC, AIFF, OGG, Opus, WMA, AC3. Also GIF, animated WebP, a photo (JPG), photos every few seconds (PNG) and subtitles (SRT). Options: resolution, codecs, quality, target file size, bitrate, frame rate, cut from/to, remove sound, quick presets. Files go to `FreeTV/Converted`.
 
 DRM-protected streams and videos that need a sign-in are shown as protected and are **not** downloaded – FreeTV does not bypass DRM, logins or other access controls. Live streams can be previewed only. Only save media you have the right to download.
 

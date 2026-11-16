@@ -33,7 +33,8 @@ exports.init = function init(ctx) {
   const folder = (sub) => { const d = path.join(ctx.getFolder(), sub); fs.mkdirSync(d, { recursive: true }); return d; };
   function uniquePath(dir, base, ext) {
     let p = path.join(dir, base + ext), i = 2;
-    while (fs.existsSync(p) || fs.existsSync(p + ".part")) p = path.join(dir, base + " (" + i++ + ")" + ext);
+    const taken = (x) => fs.existsSync(x) || fs.existsSync(x + ".part") || st.conv.some((c) => c.file === x && c.state !== "failed" && c.state !== "canceled") || st.jobs.some((j) => j.file === x && j.state !== "done" && j.state !== "failed" && j.state !== "canceled");
+    while (taken(p)) p = path.join(dir, base + " (" + i++ + ")" + ext);
     return p;
   }
 
@@ -672,73 +673,147 @@ exports.init = function init(ctx) {
   }, 1000).unref?.();
 
   // ================================================================ conversion studio
-  const AUDIO_OUT = { mp3: ["libmp3lame", "mp3"], m4a: ["aac", "ipod"], aac: ["aac", "adts"], wav: ["pcm_s16le", "wav"], flac: ["flac", "flac"] };
-  const VCODEC = { h264: "libx264", hevc: "libx265", vp9: "libvpx-vp9", mpeg4: "mpeg4" }, ACODEC = { aac: "aac", mp3: "libmp3lame", opus: "libopus", flac: "flac" };
-  const CRF = { h264: [18, 23, 28], hevc: [22, 27, 31], vp9: [28, 33, 38], mpeg4: [3, 6, 10] };
+  // Every output FreeTV can make. vc/ac = default codecs, okV/okA = what that container accepts.
+  const FORMATS = {
+    mp4: { kind: "video", f: "mp4", vc: "h264", ac: "aac", okV: ["h264", "hevc"], okA: ["aac", "mp3"] },
+    mov: { kind: "video", f: "mov", vc: "h264", ac: "aac", okV: ["h264", "hevc", "prores"], okA: ["aac", "mp3", "pcm"] },
+    m4v: { kind: "video", f: "mp4", vc: "h264", ac: "aac", okV: ["h264", "hevc"], okA: ["aac"] },
+    mkv: { kind: "video", f: "matroska", vc: "h264", ac: "aac", okV: ["h264", "hevc", "vp9", "mpeg4", "mpeg2"], okA: ["aac", "mp3", "opus", "flac", "ac3", "vorbis"], anyCopy: true },
+    avi: { kind: "video", f: "avi", vc: "mpeg4", ac: "mp3", okV: ["mpeg4", "h264"], okA: ["mp3", "ac3"] },
+    webm: { kind: "video", f: "webm", vc: "vp9", ac: "opus", okV: ["vp9"], okA: ["opus", "vorbis"] },
+    flv: { kind: "video", f: "flv", vc: "h264", ac: "aac", okV: ["h264"], okA: ["aac", "mp3"] },
+    wmv: { kind: "video", f: "asf", vc: "wmv2", ac: "wma", okV: ["wmv2"], okA: ["wma"] },
+    mpg: { kind: "video", f: "mpeg", vc: "mpeg2", ac: "mp2", okV: ["mpeg2"], okA: ["mp2"] },
+    ts: { kind: "video", f: "mpegts", vc: "h264", ac: "aac", okV: ["h264", "hevc", "mpeg2"], okA: ["aac", "mp3", "ac3", "mp2"] },
+    "3gp": { kind: "video", f: "3gp", vc: "h264", ac: "aac", okV: ["h264"], okA: ["aac"] },
+    ogv: { kind: "video", f: "ogg", vc: "theora", ac: "vorbis", okV: ["theora"], okA: ["vorbis", "opus"] },
+    prores: { kind: "video", f: "mov", ext: "mov", vc: "prores", ac: "pcm", okV: ["prores"], okA: ["pcm"] },
+    mp3: { kind: "audio", f: "mp3", ac: "mp3" }, m4a: { kind: "audio", f: "ipod", ac: "aac" }, aac: { kind: "audio", f: "adts", ac: "aac" },
+    wav: { kind: "audio", f: "wav", ac: "pcm" }, flac: { kind: "audio", f: "flac", ac: "flac" }, ogg: { kind: "audio", f: "ogg", ac: "vorbis" },
+    opus: { kind: "audio", f: "opus", ac: "opus" }, aiff: { kind: "audio", f: "aiff", ac: "pcmbe" }, wma: { kind: "audio", f: "asf", ac: "wma" }, ac3: { kind: "audio", f: "ac3", ac: "ac3" },
+    gif: { kind: "gif" }, webp: { kind: "webp" }, jpg: { kind: "frame" }, png: { kind: "frames" }, srt: { kind: "subs" },
+  };
+  const VENC = { h264: "libx264", hevc: "libx265", vp9: "libvpx-vp9", mpeg4: "mpeg4", wmv2: "wmv2", mpeg2: "mpeg2video", theora: "libtheora", prores: "prores_ks" };
+  const AENC = { aac: "aac", mp3: "libmp3lame", opus: "libopus", vorbis: "libvorbis", flac: "flac", pcm: "pcm_s16le", pcmbe: "pcm_s16be", wma: "wmav2", ac3: "ac3", mp2: "mp2" };
+  const CRF = { h264: [18, 23, 28], hevc: [22, 27, 31], vp9: [28, 33, 38], mpeg4: [3, 6, 10], wmv2: [3, 6, 10], mpeg2: [3, 6, 10], theora: [9, 7, 5] };
+  let encoders = null;
+  function caps() {
+    if (encoders) return encoders;
+    try { const t = require("node:child_process").spawnSync(ctx.ffmpegPath(), ["-hide_banner", "-encoders"], { encoding: "utf8", timeout: 15000 }).stdout || ""; encoders = new Set([...t.matchAll(/^ [VAS.][F.][S.][X.][B.][D.] (\S+)/gm)].map((m) => m[1])); } catch (e) { encoders = new Set(); }
+    return encoders;
+  }
+  const hasV = (vc) => caps().has(VENC[vc]), hasA = (ac) => caps().has(AENC[ac]);
+  function formatsAvailable() {
+    const out = {};
+    for (const [k, f] of Object.entries(FORMATS)) out[k] = f.kind === "video" ? hasV(f.vc) && hasA(f.ac) : f.kind === "audio" ? hasA(f.ac) : f.kind === "gif" ? caps().has("gif") : f.kind === "webp" ? caps().has("libwebp_anim") || caps().has("libwebp") : f.kind === "frame" ? caps().has("mjpeg") : f.kind === "frames" ? caps().has("png") : caps().has("srt");
+    return out;
+  }
+  const extOfFormat = (fmt) => (FORMATS[fmt] && FORMATS[fmt].ext) || fmt;
   function probe(file) {
     try { const r = require("node:child_process").spawnSync(ctx.ffmpegPath(), ["-hide_banner", "-i", file], { encoding: "utf8", timeout: 20000 }); const t = r.stderr || "";
       const vl = (/Stream #[^\n]*Video: [^\n]*/.exec(t) || [""])[0];
       let v = ((/Video: (\w+)/.exec(vl) || [])[1] || "").toLowerCase();
       if (v === "h264" && !/yuv420p[, ]|yuvj420p|nv12/.test(vl)) v = "h264x";            // 4:4:4 / 10-bit H.264 won't play on Apple devices: re-encode
       if (v === "hevc" && !/yuv420p(10le)?[, ]/.test(vl)) v = "hevcx";
-      return { v, a: ((/Stream #[^\n]*Audio: (\w+)/.exec(t) || [])[1] || "").toLowerCase() }; } catch (e) { return { v: "", a: "" }; }
+      if (/attached pic/.test(vl)) v = "";                                               // cover art in audio files isn't a video
+      const d = /Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(t), wh = /, (\d{2,5})x(\d{2,5})[, ]/.exec(vl);
+      return { v, a: ((/Stream #[^\n]*Audio: (\w+)/.exec(t) || [])[1] || "").toLowerCase(), subs: (t.match(/Stream #[^\n]*Subtitle:/g) || []).length,
+        duration: d ? +d[1] * 3600 + +d[2] * 60 + +d[3] : 0, width: wh ? +wh[1] : 0, height: wh ? +wh[2] : 0 }; } catch (e) { return { v: "", a: "", subs: 0, duration: 0, width: 0, height: 0 }; }
   }
-  function convArgs(input, output, o) {
-    const fmt = o.format, a = ["-hide_banner", "-nostdin", "-y", "-i", input];
-    if (AUDIO_OUT[fmt]) { a.push("-vn", "-c:a", AUDIO_OUT[fmt][0]); if (fmt === "mp3" || fmt === "m4a" || fmt === "aac") a.push("-b:a", (o.abitrate || 192) + "k"); a.push("-f", AUDIO_OUT[fmt][1]); }
-    else {
-      let vc = o.vcodec || "auto", ac = o.acodec || "auto";
-      if (vc === "smart" || ac === "smart") {
-        const info = probe(input), mp4ish = fmt === "mp4" || fmt === "mov" || fmt === "mkv";
-        const changes0 = (o.height && o.height !== "orig") || (o.fps && o.fps !== "orig");
-        if (vc === "smart") vc = mp4ish && !changes0 && /^(h264|hevc)$/.test(info.v) ? "copy" : "auto";
-        if (ac === "smart") ac = mp4ish && /^(aac|mp3)$/.test(info.a) || (fmt === "mkv" && info.a) ? "copy" : "auto";
-        if (vc === "copy" && info.v === "hevc" && fmt !== "mkv") o = { ...o, hvc1: true };
-      }
-      if (vc === "auto") vc = fmt === "webm" ? "vp9" : fmt === "avi" ? "mpeg4" : "h264";
-      if (fmt === "webm" && vc !== "vp9" ) vc = "vp9"; if (fmt === "avi" && (vc === "vp9" || vc === "hevc")) vc = "mpeg4";
-      if (ac === "auto") ac = fmt === "webm" ? "opus" : fmt === "avi" ? "mp3" : "aac";
-      if (fmt === "webm" && ac !== "opus" && ac !== "copy") ac = "opus"; if ((fmt === "mp4" || fmt === "mov") && ac === "opus") ac = "aac";
-      const changes = (o.height && o.height !== "orig") || (o.fps && o.fps !== "orig");
-      if (vc === "copy" && changes) vc = "h264";
-      a.push("-map", "0:v:0?", "-map", "0:a:0?");
-      if (vc === "copy") { a.push("-c:v", "copy"); if (o.hvc1) a.push("-tag:v", "hvc1"); }
+  const secs = (t) => { if (t === undefined || t === null || t === "") return null; const p = String(t).trim().split(":").map(Number); if (p.some(isNaN)) return null; return p.reduce((a, x) => a * 60 + x, 0); };
+  function convArgs(input, output, o, info) {
+    const fmt = o.format, F = FORMATS[fmt]; if (!F) throw new Error("Unknown format");
+    info = info || probe(input);
+    let start = secs(o.start); const end = secs(o.end), a = ["-hide_banner", "-nostdin", "-y"];
+    if (F.kind === "frame" && start == null && info.duration > 2) start = Math.round(info.duration * 0.1 * 10) / 10;   // a frame from early in the video, not the black first one
+    if (start) a.push("-ss", String(start));
+    a.push("-i", input);
+    if (end && end > (start || 0)) a.push("-t", String(end - (start || 0)));
+    const len = Math.max(1, (end || info.duration || 0) - (start || 0));
+    const scale = (h) => h && h !== "orig" ? `scale=-2:${+h}` : "";
+    if (F.kind === "subs") { if (!info.subs) throw new Error("This file has no subtitles to extract."); a.push("-map", "0:s:" + Math.max(0, (+o.subIndex || 1) - 1), "-c:s", "srt", "-f", "srt"); }
+    else if (F.kind === "frame") { a.push("-map", "0:v:0", "-frames:v", "1", "-q:v", "2"); const vf = scale(o.height); if (vf) a.push("-vf", vf); a.push("-f", "image2"); }
+    else if (F.kind === "frames") { a.push("-map", "0:v:0", "-vf", [`fps=1/${Math.max(1, +o.every || 10)}`, scale(o.height)].filter(Boolean).join(",")); a.push("-f", "image2"); }
+    else if (F.kind === "gif") {
+      const w = o.height && o.height !== "orig" ? `scale=-2:${Math.min(+o.height, 720)}:flags=lanczos` : `scale='min(480,iw)':-2:flags=lanczos`, fps = o.fps && o.fps !== "orig" ? Math.min(30, +o.fps) : 12;
+      a.push("-an", "-filter_complex", `[0:v:0]fps=${fps},${w},split[x][y];[x]palettegen=stats_mode=diff[p];[y][p]paletteuse=dither=bayer:bayer_scale=4`, "-loop", "0", "-f", "gif");
+    } else if (F.kind === "webp") {
+      const w = o.height && o.height !== "orig" ? `scale=-2:${Math.min(+o.height, 720)}` : `scale='min(480,iw)':-2`, fps = o.fps && o.fps !== "orig" ? Math.min(30, +o.fps) : 15;
+      a.push("-an", "-vf", `fps=${fps},${w}`, "-c:v", caps().has("libwebp_anim") ? "libwebp_anim" : "libwebp", "-quality", { high: "80", medium: "65", low: "45" }[o.quality || "medium"], "-loop", "0", "-f", "webp");
+    } else if (F.kind === "audio") {
+      if (!info.a) throw new Error("This file has no sound to convert.");
+      a.push("-map", "0:a:0", "-vn", "-c:a", AENC[F.ac]);
+      if (["mp3", "aac", "opus", "vorbis", "wma", "ac3"].includes(F.ac)) a.push("-b:a", (o.abitrate || 192) + "k");
+      if (F.ac === "opus") a.push("-ar", "48000"); if (F.ac === "ac3" || F.ac === "wma") a.push("-ac", "2");
+      a.push("-f", F.f);
+    } else {
+      let vc = o.vcodec || "smart", ac = o.mute ? "none" : (o.acodec || "smart");
+      const changes = (o.height && o.height !== "orig") || (o.fps && o.fps !== "orig") || !!o.targetMB || !!o.vbitrate || start != null || end != null;
+      const vcopyOk = !changes && (F.anyCopy ? !!info.v && !/x$/.test(info.v) : F.okV.includes(info.v) && ["h264", "hevc"].includes(info.v));
+      if (vc === "smart") vc = vcopyOk ? "copy" : "auto";
+      if (vc === "copy" && !vcopyOk) vc = "auto";
+      if (vc === "auto" || (vc !== "copy" && (!F.okV.includes(vc) || !hasV(vc)))) vc = F.vc;
+      const aname = { aac: "aac", mp3: "mp3", opus: "opus", vorbis: "vorbis", flac: "flac", ac3: "ac3", mp2: "mp2", wmav2: "wma" }[info.a] || "";
+      const acopyOk = !!info.a && (F.anyCopy || F.okA.includes(aname)) && start == null;
+      if (ac === "smart") ac = acopyOk ? "copy" : "auto";
+      if (ac === "copy" && !acopyOk) ac = "auto";
+      if (ac === "auto" || (ac !== "copy" && ac !== "none" && (!F.okA.includes(ac) || !hasA(ac)))) ac = F.ac;
+      a.push("-map", "0:v:0");
+      if (ac !== "none" && info.a) a.push("-map", "0:a:0");
+      if (vc === "copy") { a.push("-c:v", "copy"); if (info.v === "hevc" && (F.f === "mp4" || F.f === "mov")) a.push("-tag:v", "hvc1"); }
       else {
-        a.push("-c:v", VCODEC[vc], "-pix_fmt", "yuv420p");
-        if (o.vbitrate) a.push("-b:v", o.vbitrate + "k"); else { const q = CRF[vc][{ high: 0, medium: 1, low: 2 }[o.quality || "high"]]; if (vc === "mpeg4") a.push("-q:v", String(q)); else a.push("-crf", String(q)); if (vc === "vp9") a.push("-b:v", "0"); }
+        a.push("-c:v", VENC[vc]);
+        if (vc === "prores") a.push("-profile:v", { high: "3", medium: "2", low: "1" }[o.quality || "high"], "-pix_fmt", "yuv422p10le");
+        else a.push("-pix_fmt", "yuv420p");
+        let vb = +o.vbitrate || 0;
+        if (o.targetMB) { const ab = ac === "none" || !info.a ? 0 : (+o.abitrate || 128); vb = Math.max(150, Math.floor((+o.targetMB * 8192 * 0.96) / len) - ab); }
+        if (vc !== "prores") {
+          if (vb) { a.push("-b:v", vb + "k"); if (o.targetMB) a.push("-maxrate", Math.round(vb * 1.5) + "k", "-bufsize", vb * 2 + "k"); }
+          else { const q = CRF[vc][{ high: 0, medium: 1, low: 2 }[o.quality || "high"]]; if (["mpeg4", "wmv2", "mpeg2", "theora"].includes(vc)) a.push("-q:v", String(q)); else a.push("-crf", String(q)); if (vc === "vp9") a.push("-b:v", "0"); }
+        }
         if (vc === "h264" || vc === "hevc") a.push("-preset", "medium"); if (vc === "vp9") a.push("-row-mt", "1", "-cpu-used", "3");
-        if (vc === "hevc" && (fmt === "mp4" || fmt === "mov")) a.push("-tag:v", "hvc1");
-        if (o.height && o.height !== "orig") a.push("-vf", `scale=-2:${+o.height}`);
-        if (o.fps && o.fps !== "orig") a.push("-r", String(+o.fps));
+        if (vc === "h264" && F.f === "3gp") a.push("-profile:v", "baseline");
+        if (vc === "hevc" && (F.f === "mp4" || F.f === "mov")) a.push("-tag:v", "hvc1");
+        const vf = [scale(fmt === "3gp" && (!o.height || o.height === "orig") && info.height > 720 ? 480 : o.height), vc === "mpeg2" || vc === "wmv2" ? "" : ""].filter(Boolean).join(",");
+        if (vf) a.push("-vf", vf);
+        if (o.fps && o.fps !== "orig") a.push("-r", String(+o.fps)); else if (vc === "mpeg2") a.push("-r", "25");
       }
-      if (ac === "copy") a.push("-c:a", "copy"); else { a.push("-c:a", ACODEC[ac]); if (ac !== "flac") a.push("-b:a", (o.abitrate || 192) + "k"); }
-      if (fmt === "mp4" || fmt === "mov") a.push("-movflags", "+faststart");
-      a.push("-f", { mp4: "mp4", mov: "mov", mkv: "matroska", avi: "avi", webm: "webm" }[fmt] || "mp4");
+      if (ac === "none" || !info.a) a.push("-an");
+      else if (ac === "copy") a.push("-c:a", "copy");
+      else { a.push("-c:a", AENC[ac]); if (!["flac", "pcm", "pcmbe"].includes(ac)) a.push("-b:a", (o.abitrate || 192) + "k"); if (ac === "opus") a.push("-ar", "48000"); if (["ac3", "wma", "mp2"].includes(ac)) a.push("-ac", "2"); }
+      if (F.f === "mp4" || F.f === "mov") a.push("-movflags", "+faststart");
+      a.push("-f", F.f);
     }
     a.push("-progress", "pipe:1", "-nostats", output);
-    return a;
+    return { args: a, len };
   }
   function addConvert({ inputs, opts }) {
+    let n = 0;
     for (const input of inputs || []) {
       if (!fs.existsSync(input)) continue;
-      const out = uniquePath(folder("Converted"), safe(path.basename(input, path.extname(input))), "." + opts.format);
-      st.conv.unshift({ id: "c" + Date.now() + Math.floor(Math.random() * 999), input, name: path.basename(input), file: out, opts, state: "queued", progress: 0, error: "", created: Date.now() });
+      const base = safe(path.basename(input, path.extname(input))) + (opts.start || opts.end ? " (clip)" : "");
+      const out = opts.format === "png" ? uniquePath(folder("Converted"), base + " – frames", "") : uniquePath(folder("Converted"), base, "." + extOfFormat(opts.format));
+      st.conv.unshift({ id: "c" + Date.now() + Math.floor(Math.random() * 999) + n++, input, name: path.basename(input), file: out, opts, state: "queued", progress: 0, error: "", created: Date.now() });
     }
-    pushConv(); pumpConv();
+    pushConv(); pumpConv(); return n;
   }
   function pumpConv() {
     if (st.conv.some((c) => c.state === "converting")) return;
     const c = st.conv.filter((x) => x.state === "queued").pop(); if (!c) return;
     c.state = "converting"; pushConv();
-    const tmp = c.file + ".part"; const p = spawn(ctx.ffmpegPath(), convArgs(c.input, tmp, c.opts), { stdio: ["ignore", "pipe", "pipe"] });
+    const seq = c.opts.format === "png";
+    let built; try { if (seq) fs.mkdirSync(c.file, { recursive: true }); built = convArgs(c.input, seq ? path.join(c.file, "frame_%04d.png") : c.file + ".part", c.opts); }
+    catch (e) { Object.assign(c, { state: "failed", error: e.message }); pushConv(); return setImmediate(pumpConv); }
+    const tmp = c.file + ".part"; const p = spawn(ctx.ffmpegPath(), built.args, { stdio: ["ignore", "pipe", "pipe"] });
     running.set(c.id, { stop: () => { c.want = "cancel"; try { p.kill("SIGKILL"); } catch (e) {} } });
-    let err = "", dur = 0, lastPush = 0;
-    p.stderr.on("data", (d) => { err = (err + d).slice(-4000); if (!dur) { const m = /Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(err); if (m) dur = +m[1] * 3600 + +m[2] * 60 + +m[3]; } });
+    let err = "", lastPush = 0; const dur = built.len;
+    p.stderr.on("data", (d) => { err = (err + d).slice(-4000); });
     p.stdout.on("data", (d) => { const m = [...String(d).matchAll(/out_time_(?:us|ms)=(\d+)/g)].pop(); if (m && dur) { c.progress = Math.min(0.999, +m[1] / 1e6 / dur); if (Date.now() - lastPush > 700) { lastPush = Date.now(); pushConv(); } } });
     p.on("close", (code) => {
       running.delete(c.id);
-      if (code === 0 && fs.existsSync(tmp)) { fs.renameSync(tmp, c.file); Object.assign(c, { state: "done", progress: 1, size: fs.statSync(c.file).size }); }
-      else { try { fs.unlinkSync(tmp); } catch (e) {} Object.assign(c, { state: c.want === "cancel" ? "canceled" : "failed", error: c.want === "cancel" ? "" : (err.split("\n").filter((l) => /error|invalid|unknown|not supported|unable/i.test(l)).pop() || "conversion failed").slice(0, 220) }); }
+      const ok = code === 0 && (seq ? fs.readdirSync(c.file).length > 0 : fs.existsSync(tmp) && fs.statSync(tmp).size > 0);
+      if (ok) { if (!seq) fs.renameSync(tmp, c.file); Object.assign(c, { state: "done", progress: 1, size: seq ? fs.readdirSync(c.file).reduce((a, f) => a + fs.statSync(path.join(c.file, f)).size, 0) : fs.statSync(c.file).size, count: seq ? fs.readdirSync(c.file).length : undefined }); }
+      else { try { if (seq) fs.rmSync(c.file, { recursive: true, force: true }); else fs.unlinkSync(tmp); } catch (e) {} Object.assign(c, { state: c.want === "cancel" ? "canceled" : "failed", error: c.want === "cancel" ? "" : (err.split("\n").filter((l) => /error|invalid|unknown|not supported|unable|does not contain|no such/i.test(l)).pop() || "conversion failed").slice(0, 220) }); }
       pushConv(); pumpConv();
     });
     p.on("error", (e) => { running.delete(c.id); Object.assign(c, { state: "failed", error: e.message }); pushConv(); pumpConv(); });
@@ -761,10 +836,12 @@ exports.init = function init(ctx) {
   H("clear", async () => { st.jobs = st.jobs.filter((j) => !["done", "canceled", "failed"].includes(j.state)); pushJobs(); return {}; });
   H("settings", async (s) => { if (s.maxActive) st.settings.maxActive = Math.max(1, Math.min(6, +s.maxActive)); if (s.connections) st.settings.connections = Math.max(1, Math.min(12, +s.connections)); save(); pump(); return st.settings; });
   H("pickFiles", async () => { const r = await dialog.showOpenDialog(ctx.getWin(), { title: "Choose media files to convert", defaultPath: ctx.getFolder(), properties: ["openFile", "multiSelections"],
-    filters: [{ name: "Media", extensions: ["mp4", "mkv", "mov", "avi", "webm", "ts", "m4v", "flv", "wmv", "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus"] }] }); return { files: r.canceled ? [] : r.filePaths }; });
-  H("convert", async (o) => { addConvert(o); return {}; });
+    filters: [{ name: "Media", extensions: ["mp4", "mkv", "mov", "avi", "webm", "ts", "mts", "m2ts", "m4v", "flv", "wmv", "mpg", "mpeg", "3gp", "ogv", "vob", "mxf", "mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "aiff", "aif", "wma", "ac3", "amr", "gif"] }, { name: "All files", extensions: ["*"] }] }); return { files: r.canceled ? [] : r.filePaths }; });
+  H("convert", async (o) => ({ added: addConvert(o) }));
+  H("convCaps", async () => ({ formats: formatsAvailable() }));
+  H("probe", async ({ file }) => ({ ...probe(file), size: (() => { try { return fs.statSync(file).size; } catch (e) { return 0; } })() }));
   H("convStop", async ({ id }) => { const r = running.get(id); if (r) r.stop(); else { const c = st.conv.find((x) => x.id === id); if (c && c.state === "queued") { c.state = "canceled"; pushConv(); } } return {}; });
   H("convRemove", async ({ id }) => { const r = running.get(id); if (r) r.stop(); st.conv = st.conv.filter((x) => x.id !== id); pushConv(); return {}; });
   H("updateExtractor", async () => { if (!ytPath()) return { error: "The extractor isn't installed" }; const r = await runYt(["-U"], 120000); return { text: (r.out + r.err).trim().split("\n").pop() }; });
-  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { megaItems, parseMega, itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
+  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { probe, formatsAvailable, megaItems, parseMega, itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
 };
