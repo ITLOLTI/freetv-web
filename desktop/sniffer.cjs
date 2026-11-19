@@ -539,16 +539,16 @@ exports.init = function init(ctx) {
     return { id: j.id };
   }
   function pump() {
-    let active = st.jobs.filter((j) => j.state === "downloading").length;
+    let active = st.jobs.filter((j) => j.state === "downloading" && !j.post).length;        // jobs converting after download don't hold a download slot
     for (const j of st.jobs.filter((x) => x.state === "queued").reverse()) { if (active >= st.settings.maxActive) break; active++; start(j); }
   }
   async function start(j) {
-    j.state = "downloading"; j.error = ""; j.want = ""; pushJobs();
+    j.state = "downloading"; j.error = ""; j.want = ""; j.post = false; pushJobs();
     try {
       if (j.engine === "mega") { const r = await megaUrl(j); j.url = r.g; if (r.s) j.total = r.s; }
       await (j.engine === "direct" || j.engine === "mega" ? runDirect(j) : j.engine === "ytdlp" ? runYtJob(j) : runFfmpegJob(j));
-      if (j.compress && !j.compressed) { await compressToSize(j); if (j.want) throw new Error("stopped"); }
-      else if (!j.audio && j.engine !== "mega" && !j.compressed) { await makeAppleFriendly(j); if (j.want) throw new Error("stopped"); }
+      if (j.compress && !j.compressed) { await afterDownload(j, () => compressToSize(j)); if (j.want) throw new Error("stopped"); }
+      else if (!j.audio && j.engine !== "mega" && !j.compressed) { await afterDownload(j, () => makeAppleFriendly(j)); if (j.want) throw new Error("stopped"); }
       try { j.size = j.total = fs.statSync(j.file).size; } catch (e) {}
       Object.assign(j, { state: "done", speed: 0, eta: 0, ended: Date.now(), parts: undefined });
       if (j.after === "mp4") addConvert({ inputs: [j.file], opts: { format: "mp4", vcodec: "smart", acodec: "smart", quality: "high", abitrate: 192 } });
@@ -564,6 +564,15 @@ exports.init = function init(ctx) {
       } else Object.assign(j, { state: "failed", speed: 0, error: String(e.message || e).slice(0, 220) });
     }
     running.delete(j.id); pushJobs(); pump();
+  }
+  // converting after download: frees the download slot right away so the next download starts, and runs at most 2 at a time (the Mac's video chip has a few encoders)
+  let postBusy = 0; const postWait = [];
+  async function afterDownload(j, fn) {
+    j.post = true; j.speed = 0; j.eta = 0; pump();
+    if (postBusy >= 2) { j.phase = "Waiting to convert"; j.phaseProgress = 0; pushJobs(); while (postBusy >= 2) await new Promise((r) => postWait.push(r)); }
+    postBusy++;
+    try { if (!j.want) return await fn(); }
+    finally { postBusy--; j.post = false; if (j.phase === "Waiting to convert") j.phase = ""; const n = postWait.shift(); if (n) n(); }
   }
   function cleanup(j) {
     try { const dir = path.dirname(j.file), b = path.basename(j.file, path.extname(j.file));
@@ -740,11 +749,18 @@ exports.init = function init(ctx) {
         duration: d ? +d[1] * 3600 + +d[2] * 60 + +d[3] : 0, width: wh ? +wh[1] : 0, height: wh ? +wh[2] : 0, kbps: br ? +br[1] : 0, tenbit: /10le|p010/.test(vl) }; } catch (e) { return { v: "", a: "", subs: 0, duration: 0, width: 0, height: 0, kbps: 0, tenbit: false }; }
   }
   const secs = (t) => { if (t === undefined || t === null || t === "") return null; const p = String(t).trim().split(":").map(Number); if (p.some(isNaN)) return null; return p.reduce((a, x) => a * 60 + x, 0); };
+  let vtSpeed = null;                                     // newer ffmpeg: -prio_speed 1 lets the Mac's video encoder favour speed
+  function vtFast(enc) {
+    if (vtSpeed === null) { try { vtSpeed = /prio_speed/.test(require("node:child_process").spawnSync(ctx.ffmpegPath(), ["-hide_banner", "-h", "encoder=hevc_videotoolbox"], { encoding: "utf8", timeout: 15000 }).stdout || ""); } catch (e) { vtSpeed = false; } }
+    return vtSpeed && /videotoolbox/.test(enc) ? ["-prio_speed", "1"] : [];
+  }
+  // decode on the video chip too (H.264, HEVC, VP9, ProRes on Apple Silicon); ffmpeg falls back to the processor by itself when it can't
+  const hwDec = () => process.platform === "darwin" ? ["-hwaccel", "videotoolbox"] : [];
   function appleVideoArgs(info) {
     const vt = caps().has("hevc_videotoolbox"), h = info.height || 1080;
     const floor = h >= 2000 ? 24000 : h >= 1400 ? 14000 : h >= 1000 ? 8000 : h >= 700 ? 4500 : 2500;
     const kb = Math.min(80000, Math.max(floor, Math.round((info.kbps || 0) * 1.4)));
-    const a = vt ? ["-c:v", "hevc_videotoolbox", "-allow_sw", "1", "-b:v", kb + "k", "-maxrate", Math.round(kb * 1.5) + "k", "-bufsize", kb * 2 + "k"] : ["-c:v", "libx265", "-preset", "fast", "-crf", "20", "-x265-params", "log-level=error"];
+    const a = vt ? ["-c:v", "hevc_videotoolbox", "-allow_sw", "1", ...vtFast("hevc_videotoolbox"), "-b:v", kb + "k", "-maxrate", Math.round(kb * 1.5) + "k", "-bufsize", kb * 2 + "k"] : ["-c:v", "libx265", "-preset", "fast", "-crf", "20", "-x265-params", "log-level=error"];
     a.push("-pix_fmt", info.tenbit ? (vt ? "p010le" : "yuv420p10le") : "yuv420p");
     if (info.tenbit && vt) a.push("-profile:v", "main10");
     a.push("-tag:v", "hvc1");
@@ -758,7 +774,7 @@ exports.init = function init(ctx) {
       const info = probe(j.file); if (appleOk(info)) return resolve();
       const out = j.file.replace(/\.(mkv|webm|mov|m4v)$/i, ".mp4"), tmp = out + ".mac.part";
       const okV = !info.v || /^(h264|hevc)$/.test(info.v);
-      const args = ["-hide_banner", "-nostdin", "-y", "-i", j.file, "-map", "0:v:0?", "-map", "0:a:0?",
+      const args = ["-hide_banner", "-nostdin", "-y", ...(okV ? [] : hwDec()), "-i", j.file, "-map", "0:v:0?", "-map", "0:a:0?",
         ...(okV ? ["-c:v", "copy", ...(info.v === "hevc" ? ["-tag:v", "hvc1"] : [])] : appleVideoArgs(info)),
         ...(info.a && !/^(aac|mp3|alac|ac3|eac3)$/.test(info.a) ? ["-c:a", "aac", "-b:a", "192k"] : ["-c:a", "copy"]),
         "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:1", "-nostats", tmp];
@@ -798,8 +814,8 @@ exports.init = function init(ctx) {
     const h = Math.min(j.compress.height, info.height || j.compress.height), vf = info.height && h < info.height ? ["-vf", "scale=-2:" + h] : [];
     const out = j.file.replace(/\.[^.\/]+$/, "") + ".mp4", tmp = out + ".small.part", log = path.join(app.getPath("temp"), "ftv-2pass-" + j.id);
     const x264 = caps().has("libx264");
-    const venc = x264 ? ["-c:v", "libx264", "-preset", "medium", "-b:v", vkb + "k"] : ["-c:v", "h264_videotoolbox", "-b:v", vkb + "k", "-maxrate", Math.round(vkb * 1.3) + "k", "-bufsize", vkb * 2 + "k"];
-    const base = ["-hide_banner", "-nostdin", "-y", "-i", j.file, "-map", "0:v:0", ...vf, ...venc, "-pix_fmt", "yuv420p"];
+    const venc = x264 ? ["-c:v", "libx264", "-preset", "fast", "-b:v", vkb + "k"] : ["-c:v", "h264_videotoolbox", ...vtFast("h264_videotoolbox"), "-b:v", vkb + "k", "-maxrate", Math.round(vkb * 1.3) + "k", "-bufsize", vkb * 2 + "k"];
+    const base = ["-hide_banner", "-nostdin", "-y", ...hwDec(), "-i", j.file, "-map", "0:v:0", ...vf, ...venc, "-pix_fmt", "yuv420p"];
     j.phase = "Compressing"; j.phaseProgress = 0; pushJobs();
     let r = { code: 0, err: "" };
     if (x264) {
