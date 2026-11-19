@@ -888,7 +888,7 @@ async function startItem(item, bi) {
   b.eng.onTracks = () => autoTracks(b);
   b.autoDone = false;
   const pos = item.kind !== "live" && store.get("resumeVod", true) ? positions()[item.key] : null;
-  b.eng.load(url, { live: item.kind === "live", headers: item.headers, startAt: pos && pos.t > 10 ? pos.t - 3 : 0, local: item.localFile });
+  b.eng.load(url, { live: item.kind === "live", headers: item.headers, startAt: item.startAt || (pos && pos.t > 10 ? pos.t - 3 : 0), local: item.localFile });
   b.video.muted = bi !== P.sel;
   b.video.className = OPT.aspectCls[cfg("aspect")];
 }

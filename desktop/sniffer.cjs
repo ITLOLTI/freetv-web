@@ -517,18 +517,24 @@ exports.init = function init(ctx) {
   const job = (id) => st.jobs.find((j) => j.id === id);
   function addDownload(o) {
     const f = o.format || {};
-    const sig = [o.pageUrl, f.id, f.kind, f.url || "", f.audio || ""].join("|");
+    const D = o.duration || 0;
+    let sec = o.section && f.kind !== "mega" && D ? { start: Math.max(0, Math.round(+o.section.start || 0)), end: Math.min(Math.round(D), Math.round(+o.section.end || D)), exact: !!o.section.exact } : null;
+    if (sec && (sec.end - sec.start < 1 || (sec.start <= 0 && sec.end >= Math.round(D)))) sec = null;   // the whole video after all
+    const comp = o.compress && +o.compress.bytes > 0 && !f.audio ? { bytes: Math.round(+o.compress.bytes), height: Math.max(144, +o.compress.height || 720), abr: Math.max(48, Math.min(192, +o.compress.abr || 128)) } : null;
+    const sig = [o.pageUrl, f.id, f.kind, f.url || "", f.audio || "", sec ? sec.start + "-" + sec.end : "", comp ? comp.bytes : ""].join("|");
     const dup = st.jobs.find((j) => j.sig === sig && j.state !== "canceled" && j.state !== "failed");
     if (dup && !o.force) return { duplicate: true, id: dup.id, state: dup.state };
     const useYt = f.kind === "ytdlp" || ((f.kind === "hls" || f.kind === "dash") && !!ytPath());
+    const hhmmss = (t) => [Math.floor(t / 3600), Math.floor(t % 3600 / 60), t % 60].map((x) => String(x).padStart(2, "0")).join("-").replace(/^00-/, "");
+    const tag = (sec ? " (" + hhmmss(sec.start) + " to " + hhmmss(sec.end) + ")" : "") + (comp ? " (" + Math.max(1, Math.round(comp.bytes / 1e6)) + " MB)" : "");
     // an HLS quality is fetched from its master playlist, so separate audio tracks come along
     const hlsSel = f.kind === "hls" && useYt && f.master ? (f.audio ? "" : f.height ? `bv*[height<=${f.height}]+ba/b[height<=${f.height}]/bv*+ba/b` : "bv*+ba/b") : "";
     const ext = "." + (f.audio || f.ext || "mp4");
     const dir = folder(AUDIO_EXT.includes(ext.slice(1)) ? path.join("Web", "Audio") : "Web");
-    const file = f.kind === "mega" ? uniquePath(folder(path.join("Web", "MEGA")), safe(o.title), "." + (f.ext || "bin")) : uniquePath(dir, safe(o.title) + (f.height && !f.audio ? " " + f.height + "p" : ""), ext);
+    const file = f.kind === "mega" ? uniquePath(folder(path.join("Web", "MEGA")), safe(o.title), "." + (f.ext || "bin")) : uniquePath(dir, safe(o.title) + (f.height && !f.audio && !comp ? " " + f.height + "p" : "") + tag, comp ? ".mp4" : ext);
     const j = { id: "w" + Date.now() + Math.floor(Math.random() * 999), sig, title: o.title, thumbnail: o.thumbnail || "", pageUrl: o.pageUrl, site: o.site || "", label: f.label || "",
-      engine: f.kind === "mega" ? "mega" : useYt ? "ytdlp" : f.kind === "direct" ? "direct" : "ffmpeg", mega: f.mega || null, after: f.toMp4 ? "mp4" : f.toMp3 ? "mp3" : "", url: f.kind === "ytdlp" ? o.pageUrl : (useYt && f.master) || f.url, headers: f.headers || null, browse: !!f.browse, sel: f.sel || hlsSel, sort: f.sort || (hlsSel && f.height ? `res:${f.height}` : ""), audio: f.audio || "",
-      duration: o.duration || 0, file, state: "queued", size: 0, total: f.size || 0, speed: 0, eta: 0, tries: 0, created: Date.now(), error: "" };
+      engine: f.kind === "mega" ? "mega" : useYt ? "ytdlp" : f.kind === "direct" && !sec ? "direct" : "ffmpeg", section: sec, compress: comp, mega: f.mega || null, after: f.toMp4 ? "mp4" : f.toMp3 ? "mp3" : "", url: f.kind === "ytdlp" ? o.pageUrl : (useYt && f.master) || f.url, headers: f.headers || null, browse: !!f.browse, sel: f.sel || hlsSel, sort: f.sort || (hlsSel && f.height ? `res:${f.height}` : ""), audio: f.audio || "",
+      duration: o.duration || 0, file, state: "queued", size: 0, total: Math.round((f.size || 0) * (sec && D ? (sec.end - sec.start) / D : 1)), speed: 0, eta: 0, tries: 0, created: Date.now(), error: "" };
     st.jobs.unshift(j); pushJobs(); pump();
     return { id: j.id };
   }
@@ -541,7 +547,8 @@ exports.init = function init(ctx) {
     try {
       if (j.engine === "mega") { const r = await megaUrl(j); j.url = r.g; if (r.s) j.total = r.s; }
       await (j.engine === "direct" || j.engine === "mega" ? runDirect(j) : j.engine === "ytdlp" ? runYtJob(j) : runFfmpegJob(j));
-      if (!j.audio && j.engine !== "mega") { await makeAppleFriendly(j); if (j.want) throw new Error("stopped"); }
+      if (j.compress && !j.compressed) { await compressToSize(j); if (j.want) throw new Error("stopped"); }
+      else if (!j.audio && j.engine !== "mega" && !j.compressed) { await makeAppleFriendly(j); if (j.want) throw new Error("stopped"); }
       try { j.size = j.total = fs.statSync(j.file).size; } catch (e) {}
       Object.assign(j, { state: "done", speed: 0, eta: 0, ended: Date.now(), parts: undefined });
       if (j.after === "mp4") addConvert({ inputs: [j.file], opts: { format: "mp4", vcodec: "smart", acodec: "smart", quality: "high", abitrate: 192 } });
@@ -625,6 +632,7 @@ exports.init = function init(ctx) {
       else { args.push("-f", j.sel || "bv*+ba/b"); if (j.sort) args.push("-S", j.sort); args.push("--merge-output-format", "mp4"); }
       for (const [k, v] of Object.entries(j.headers || {})) args.push("--add-header", k + ":" + v);
       if (ck) args.push("--cookies", ck);
+      if (j.section) { args.push("--download-sections", "*" + j.section.start + "-" + j.section.end); if (j.section.exact) args.push("--force-keyframes-at-cuts"); }
       args.push(j.url);
       const p = spawn(ytPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
       running.set(j.id, { stop: () => { try { p.kill("SIGTERM"); } catch (e) {} } });
@@ -638,7 +646,9 @@ exports.init = function init(ctx) {
             j.size = base + dl; const t = +tot || +est || 0; if (t) j.total = Math.max(j.total || 0, base + t); j.speed = +sp || 0; j.eta = +eta || 0; j.error = ""; }
         }
       });
-      p.stderr.on("data", (d) => { err = (err + d).slice(-4000); });
+      p.stderr.on("data", (d) => { err = (err + d).slice(-4000);
+        if (j.section) { const m = [...String(d).matchAll(/time=(\d+):(\d\d):(\d\d)/g)].pop(); const len = j.section.end - j.section.start;     // only a part: ffmpeg does the cutting, so its clock is the progress
+          if (m && len && j.total) { const done = Math.min(0.99, (+m[1] * 3600 + +m[2] * 60 + +m[3]) / len); if (done * j.total > j.size) j.size = Math.round(done * j.total); } } });
       p.on("error", (e) => reject(e));
       p.on("close", (code) => {
         if (code === 0) { if (finalFile && fs.existsSync(finalFile)) j.file = finalFile; return resolve(); }
@@ -653,14 +663,21 @@ exports.init = function init(ctx) {
       const tmp = j.file + ".part"; const h = { ...(j.headers || {}), ...ck };
       const args = ["-hide_banner", "-nostdin", "-y", "-user_agent", UA];
       if (Object.keys(h).length) args.push("-headers", Object.entries(h).map(([k, v]) => k + ": " + v).join("\r\n") + "\r\n");
+      const sec = j.section, len = sec ? sec.end - sec.start : j.duration;
+      if (sec) args.push("-ss", String(sec.start));
       args.push("-i", j.url);
-      if (j.audio === "mp3") args.push("-vn", "-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3"); else args.push("-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4");
+      if (sec) args.push("-t", String(len));
+      const audioExt = /\.(m4a|aac|mp3|flac|wav|ogg|opus)$/i.exec(j.file);
+      if (j.audio === "mp3" || (audioExt && /mp3/i.test(audioExt[1]))) args.push("-vn", "-c:a", "libmp3lame", "-q:a", "2", "-f", "mp3");
+      else if (audioExt) args.push("-vn", ...(sec && sec.exact ? ["-c:a", "aac", "-b:a", "192k"] : ["-c:a", "copy"]), "-f", ({ m4a: "ipod", aac: "adts" })[audioExt[1].toLowerCase()] || audioExt[1].toLowerCase());
+      else if (sec && sec.exact) args.push("-map", "0:v:0?", "-map", "0:a:0?", ...(caps().has("libx264") ? ["-c:v", "libx264", "-preset", "fast", "-crf", "18"] : ["-c:v", "h264_videotoolbox", "-b:v", "8000k"]), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "mp4");
+      else args.push("-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4");
       args.push(tmp);
       const p = spawn(ctx.ffmpegPath(), args, { stdio: ["ignore", "ignore", "pipe"] });
       running.set(j.id, { stop: () => { try { p.kill("SIGKILL"); } catch (e) {} } });
       let err = "", t0 = Date.now();
       p.stderr.on("data", (d) => { err = (err + d).slice(-3000); const m = [...String(d).matchAll(/time=(\d+):(\d\d):(\d\d)/g)].pop(), s = [...String(d).matchAll(/size=\s*(\d+)\s*Ki?B/gi)].pop();
-        if (s) j.size = +s[1] * 1024; if (m && j.duration) { const done = (+m[1] * 3600 + +m[2] * 60 + +m[3]) / j.duration; if (done > 0.01) { j.total = Math.round(j.size / done); j.eta = Math.round(((Date.now() - t0) / 1000) * (1 - done) / done); } } });
+        if (s) j.size = +s[1] * 1024; if (m && len) { const done = (+m[1] * 3600 + +m[2] * 60 + +m[3]) / len; if (done > 0.01) { j.total = Math.round(j.size / done); j.eta = Math.round(((Date.now() - t0) / 1000) * (1 - done) / done); } } });
       p.on("error", reject);
       p.on("close", (code) => { if (code === 0) { fs.renameSync(tmp, j.file); resolve(); } else { try { fs.unlinkSync(tmp); } catch (e) {} reject(new Error((err.split("\n").filter((l) => /error|invalid|forbidden|denied/i.test(l)).pop() || "stream download failed").slice(0, 200))); } });
     });
@@ -759,6 +776,65 @@ exports.init = function init(ctx) {
       });
       p.on("error", () => { running.delete(j.id); j.phase = ""; resolve(); });
     });
+  }
+  function ffRun(args, onTime, j) {
+    return new Promise((resolve) => {
+      const p = spawn(ctx.ffmpegPath(), args, { stdio: ["ignore", "pipe", "pipe"] });
+      running.set(j.id, { stop: () => { try { p.kill("SIGKILL"); } catch (e) {} } });
+      let err = "";
+      p.stderr.on("data", (d) => { err = (err + d).slice(-3000); });
+      p.stdout.on("data", (d) => { const m = [...String(d).matchAll(/out_time_(?:us|ms)=(\d+)/g)].pop(); if (m) onTime(+m[1] / 1e6); });
+      p.on("close", (code) => { running.delete(j.id); resolve({ code, err }); });
+      p.on("error", (e) => { running.delete(j.id); resolve({ code: -1, err: e.message }); });
+    });
+  }
+  async function compressToSize(j) {
+    if (!fs.existsSync(j.file)) return;
+    const info = probe(j.file), size = fs.statSync(j.file).size, len = info.duration || (j.section ? j.section.end - j.section.start : j.duration);
+    if (!info.v || !len) return makeAppleFriendly(j);
+    if (j.compress.bytes >= size * 0.97) { j.note = "Already smaller than the size you chose – kept as it is"; j.compressed = size; return makeAppleFriendly(j); }
+    const abr = info.a ? j.compress.abr : 0;
+    const vkb = Math.max(80, Math.floor(j.compress.bytes * 8 / 1000 / len * 0.97) - abr);         // ~3 % for the MP4 container
+    const h = Math.min(j.compress.height, info.height || j.compress.height), vf = info.height && h < info.height ? ["-vf", "scale=-2:" + h] : [];
+    const out = j.file.replace(/\.[^.\/]+$/, "") + ".mp4", tmp = out + ".small.part", log = path.join(app.getPath("temp"), "ftv-2pass-" + j.id);
+    const x264 = caps().has("libx264");
+    const venc = x264 ? ["-c:v", "libx264", "-preset", "medium", "-b:v", vkb + "k"] : ["-c:v", "h264_videotoolbox", "-b:v", vkb + "k", "-maxrate", Math.round(vkb * 1.3) + "k", "-bufsize", vkb * 2 + "k"];
+    const base = ["-hide_banner", "-nostdin", "-y", "-i", j.file, "-map", "0:v:0", ...vf, ...venc, "-pix_fmt", "yuv420p"];
+    j.phase = "Compressing"; j.phaseProgress = 0; pushJobs();
+    let r = { code: 0, err: "" };
+    if (x264) {
+      r = await ffRun([...base, "-pass", "1", "-passlogfile", log, "-an", "-f", "mp4", "-progress", "pipe:1", "-nostats", "/dev/null"], (t) => { j.phaseProgress = Math.min(0.499, t / len / 2); }, j);
+      if (j.want) return;
+    }
+    if (r.code === 0) r = await ffRun([...base, ...(x264 ? ["-pass", "2", "-passlogfile", log] : []), ...(info.a ? ["-map", "0:a:0", "-c:a", "aac", "-b:a", abr + "k"] : ["-an"]),
+      "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:1", "-nostats", tmp], (t) => { j.phaseProgress = Math.min(0.999, x264 ? 0.5 + t / len / 2 : t / len); }, j);
+    for (const f of fs.readdirSync(path.dirname(log))) if (f.startsWith(path.basename(log))) try { fs.unlinkSync(path.join(path.dirname(log), f)); } catch (e) {}
+    j.phase = ""; j.phaseProgress = 0;
+    if (j.want) { try { fs.unlinkSync(tmp); } catch (e) {} return; }
+    if (r.code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 0) { try { if (out !== j.file) fs.unlinkSync(j.file); fs.renameSync(tmp, out); j.file = out; j.compressed = fs.statSync(out).size; } catch (e) {} }
+    else { try { fs.unlinkSync(tmp); } catch (e) {} j.note = "Couldn't compress it – kept the original. " + ((r.err.split("\n").filter((l) => /error|invalid/i.test(l)).pop() || "").slice(0, 120)); await makeAppleFriendly(j); }
+  }
+  // --- small pictures along the trim timeline: one frame from each tenth of the video
+  let framesKey = "", framesProcs = [];
+  async function frames({ key, url, headers, duration, n }) {
+    for (const p of framesProcs) try { p.kill("SIGKILL"); } catch (e) {}
+    framesProcs = []; framesKey = key; n = Math.max(1, Math.min(20, +n || 10));
+    if (!url || !duration) return {};
+    const grab = (i) => new Promise((resolve) => {
+      const t = Math.max(0, duration * (i + 0.5) / n);
+      const a = ["-hide_banner", "-nostdin", "-loglevel", "error", "-user_agent", (headers && headers["User-Agent"]) || UA];
+      const h = Object.entries(headers || {}).filter(([k]) => !/^user-agent$/i.test(k)); if (h.length) a.push("-headers", h.map(([k, v]) => k + ": " + v).join("\r\n") + "\r\n");
+      a.push("-ss", t.toFixed(1), "-i", url, "-map", "0:v:0", "-frames:v", "1", "-vf", "scale=-2:120", "-q:v", "6", "-f", "image2", "-c:v", "mjpeg", "pipe:1");
+      const p = spawn(ctx.ffmpegPath(), a, { stdio: ["ignore", "pipe", "ignore"] }); framesProcs.push(p);
+      const bufs = []; const tm = setTimeout(() => { try { p.kill("SIGKILL"); } catch (e) {} }, 20000);
+      p.stdout.on("data", (d) => bufs.push(d));
+      p.on("close", () => { clearTimeout(tm); const b = Buffer.concat(bufs); if (b.length > 200 && framesKey === key) emit("frame", { key, i, src: "data:image/jpeg;base64," + b.toString("base64") }); resolve(); });
+      p.on("error", () => { clearTimeout(tm); resolve(); });
+    });
+    const order = Array.from({ length: n }, (_, i) => i); let next = 0;
+    const worker = async () => { while (next < order.length && framesKey === key) await grab(order[next++]); };
+    Promise.all([worker(), worker(), worker()]).catch(() => {});
+    return { ok: true };
   }
   function convArgs(input, output, o, info) {
     const fmt = o.format, F = FORMATS[fmt]; if (!F) throw new Error("Unknown format");
@@ -868,6 +944,7 @@ exports.init = function init(ctx) {
   H("browse", browseCmd);
   H("formats", async ({ url }) => { const items = await analyzeYt(url, false).catch((e) => { throw new Error(e.userMsg || e.detail || "Couldn't read this video"); }); return items[0]; });
   H("download", async (o) => addDownload(o));
+  H("frames", frames);
   H("pause", async ({ id }) => { const j = job(id); if (!j) return {}; j.want = "pause"; const r = running.get(id); if (r) r.stop(); else if (j.state === "queued") { j.state = "paused"; pushJobs(); } return {}; });
   H("resume", async ({ id }) => { const j = job(id); if (j && ["paused", "failed", "canceled"].includes(j.state)) { j.state = "queued"; j.tries = 0; j.error = ""; j.want = ""; pushJobs(); pump(); } return {}; });
   H("cancel", async ({ id }) => { const j = job(id); if (!j) return {}; j.want = "cancel"; const r = running.get(id); if (r) r.stop(); else { j.state = "canceled"; cleanup(j); pushJobs(); } return {}; });
@@ -883,5 +960,5 @@ exports.init = function init(ctx) {
   H("convStop", async ({ id }) => { const r = running.get(id); if (r) r.stop(); else { const c = st.conv.find((x) => x.id === id); if (c && c.state === "queued") { c.state = "canceled"; pushConv(); } } return {}; });
   H("convRemove", async ({ id }) => { const r = running.get(id); if (r) r.stop(); st.conv = st.conv.filter((x) => x.id !== id); pushConv(); return {}; });
   H("updateExtractor", async () => { if (!ytPath()) return { error: "The extractor isn't installed" }; const r = await runYt(["-U"], 120000); return { text: (r.out + r.err).trim().split("\n").pop() }; });
-  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { makeAppleFriendly, probe, formatsAvailable, megaItems, parseMega, itemFromInfo, analyze, addDownload, st, convArgs, addConvert } };
+  return { stopAll: () => { try { if (bview) bview.webContents.close(); } catch (e) {} for (const r of running.values()) try { r.stop(); } catch (e) {} }, _test: { makeAppleFriendly, probe, formatsAvailable, megaItems, parseMega, itemFromInfo, analyze, addDownload, st, convArgs, addConvert, compressToSize, frames } };
 };

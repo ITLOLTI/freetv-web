@@ -16,6 +16,7 @@ async function snInit() {
     if (e.type === "jobs") { SN.jobs = e.jobs; if (snVisible()) { snBadge(); if (SN.view === "downloads") snDrawJobs(); } }
     if (e.type === "browse") { SN.bcount = e.count; if (!e.count) { SN.bres = null; SN.bopen = false; } if (snVisible() && SN.view === "browse") { snBrowseBtn(); if (!e.count) snBrowsePanel(); } }
     if (e.type === "toast") toast(e.msg);
+    if (e.type === "frame") snFrame(e);
     if (e.type === "bnav") snBrowseNav(e);
     if (e.type === "bclick" && S.tab === "sniffer" && SN.view === "browse") { SN.bres = null; snBrowseLoad(); }
     if (e.type === "conv") { SN.conv = e.conv; if (cvVisible()) { snDrawConv(); if (e.conv.some((c) => c.state === "done") && $("#cvrecent")) cvDrawFiles(); } }
@@ -88,28 +89,153 @@ function snPreview(it) {
   closeSheet();
   openPlayer({ kind: it.live ? "live" : "movie", key: "sn:" + it.id, title: it.title, url: it.previewUrl, headers: it.previewHeaders || undefined, group: tr("Web Sniffer"), logo: it.thumbnail });
 }
+// ------------------------------------------------------------------ download window: quality, trim (only a part) and compress to a size
+const snCanTrim = (it) => !it.drm && !it.live && it.duration > 1 && (it.formats || []).length && !(it.formats || []).some((f) => f.kind === "mega");
+const snVids = (it) => (it.formats || []).filter((f) => !f.audio);
+const snPart = (it) => it.trim && it.trim.on ? Math.max(1, it.trim.e - it.trim.s) : it.duration || 0;
+const snFrac = (it) => it.duration ? snPart(it) / it.duration : 1;
+function snParseT(v) { const p = String(v || "").trim().split(":").map((x) => x.trim()); if (!p.length || p.some((x) => x === "" || isNaN(+x))) return null; return p.reduce((a, x) => a * 60 + +x, 0); }
+// compress: the slider runs from the smallest sensible file to the best quality, on a log scale (kbps for picture + sound)
+const SN_CMIN = 250;
+function snCMax(it) {
+  const v = snVids(it); const best = v[0] || {}; const kb = best.size && it.duration ? best.size * 8 / it.duration / 1000 : 0;
+  const byH = { 2160: 20000, 1440: 10000, 1080: 5000, 720: 2800, 480: 1200, 360: 800 }; const h = best.height || 1080;
+  return Math.max(SN_CMIN * 2, Math.round(kb || byH[Object.keys(byH).map(Number).find((x) => x >= h) || 2160] || 5000));
+}
+function snCPlan(it) {
+  const c = it.comp, max = snCMax(it), len = snPart(it);
+  const kb = c.mb ? Math.min(max, Math.max(SN_CMIN, c.mb * 8e6 / 1000 / len)) : SN_CMIN * Math.pow(max / SN_CMIN, c.p / 1000);
+  const abr = kb < 600 ? 64 : kb < 1600 ? 96 : 128, vkb = Math.max(120, kb - abr);
+  const top = Math.max(...snVids(it).map((f) => f.height || 0), 0) || 2160;
+  const h = Math.min(top, vkb < 450 ? 360 : vkb < 900 ? 480 : vkb < 2000 ? 720 : vkb < 4500 ? 1080 : vkb < 9000 ? 1440 : 2160);
+  const r = Math.log(kb / SN_CMIN) / Math.log(max / SN_CMIN);
+  const word = r < 0.2 ? "Smallest file" : r < 0.45 ? "Small file" : r < 0.7 ? "Good" : r < 0.9 ? "Very good" : "Best quality";
+  const bytes = c.mb ? c.mb * 1e6 : Math.round(kb * 1000 / 8 * len);
+  // download the smallest quality that is still bigger than the chosen size at that picture size, so compressing only ever makes it smaller
+  const fr = snFrac(it), up = snVids(it).slice().sort((a, b) => (a.height || 0) - (b.height || 0));
+  const src = up.find((f) => (f.height || 0) >= h && (!f.size || f.size * fr >= bytes)) || up[up.length - 1];
+  return { kb, abr, h, word, bytes, src, p: Math.round(1000 * Math.max(0, Math.min(1, r))) };
+}
+function snQualHtml(it) {
+  const fr = snFrac(it), part = it.trim && it.trim.on;
+  return '<div class="small dim" style="margin:8px 0 6px">' + (part ? tr("Choose a quality – sizes are for the part") + " (" + fmtTime(snPart(it)) + ")" : tr("Choose a quality to download")) + '</div><div class="list">' +
+    it.formats.map((f, i) => { const sz = f.size ? f.size * fr : 0;
+      return '<button class="item" data-f="' + i + '"><span style="flex:1;text-align:left">' + esc(/^Original file · /.test(f.label) ? tr("Original file · MKV").replace("MKV", f.label.split("· ")[1]) : tr(f.label)) +
+        (f.note ? ' <span class="dim small">' + esc(f.note) + "</span>" : "") + '</span><span class="dim small">' + esc([(f.out || f.audio || f.ext || "").toUpperCase(), (sz ? "~" : "") + snSize(sz)].filter(Boolean).join(" · ")) + "</span>" + I.dl + "</button>"; }).join("") + "</div>";
+}
+function snTrimHtml(it) {
+  const t = it.trim, d = it.duration, n = 10;
+  const marks = [0, 0.25, 0.5, 0.75, 1].map((x) => "<span>" + fmtTime(d * x) + "</span>").join("");
+  return '<div class="sn-trim"><div class="row"><b class="sn-sec">' + SN_SCIS + tr("Trim") + '</b><span class="sp"></span><div class="seg sn-pill"><button data-tw="0" class="' + (t.on ? "" : "on") + '">' + tr("Whole video") + '</button><button data-tw="1" class="' + (t.on ? "on" : "") + '">' + tr("Only a part") + "</button></div></div>" +
+    (!t.on ? "" : '<div class="sn-tl" id="sntl"><div class="sn-strip">' + Array.from({ length: n }, (_, i) => '<i id="snf' + i + '">' + (it.frames && it.frames[i] ? '<img src="' + it.frames[i] + '">' : it.thumbnail ? '<img class="th" referrerpolicy="no-referrer" src="' + esc(it.thumbnail) + '" onerror="this.remove()">' : "") + "</i>").join("") +
+      '</div><div class="sn-dim l"></div><div class="sn-dim r"></div><div class="sn-sel"></div><button class="sn-h l" data-h="s" aria-label="' + tr("Start") + '"></button><button class="sn-h r" data-h="e" aria-label="' + tr("End") + '"></button><div class="sn-pop hidden" id="snpop"><div class="pi"></div><span></span></div></div>' +
+      '<div class="sn-marks">' + marks + "</div>" +
+      '<div class="row sn-times"><label>' + tr("From") + '<input id="sntf" value="' + fmtTime(t.s) + '" spellcheck="false"></label><label>' + tr("To") + '<input id="snte" value="' + fmtTime(t.e) + '" spellcheck="false"></label><div class="sn-len"><span>' + tr("Length") + '</span><b id="snlen">' + fmtTime(t.e - t.s) + "</b></div><span class=\"sp\"></span>" +
+      (it.previewUrl ? '<button class="btn" id="snpvp">' + I.play + tr("Preview part") + "</button>" : "") + "</div>" +
+      '<div class="row sn-chips">' + [["first5", "First 5 min"], ["last10", "Last 10 min"], ["reset", "Reset"]].map(([k, l]) => '<button class="chip" data-tq="' + k + '">' + tr(l) + "</button>").join("") + "</div>" +
+      '<div class="sn-cut">' + [[0, "Fast cut", "Original quality, may start a second or two early"], [1, "Exact cut", "Starts on the exact second, takes a bit longer"]].map(([v, a, b]) =>
+        '<label class="' + (!!t.exact === !!v ? "on" : "") + '"><input type="radio" name="sncut" value="' + v + '"' + (!!t.exact === !!v ? " checked" : "") + "><span><b>" + tr(a) + "</b><small>" + tr(b) + "</small></span></label>").join("") + "</div>") + "</div>";
+}
+function snCompHtml(it) {
+  const c = it.comp;
+  if (!c.on) return '<label class="sn-check sn-copt"><input type="checkbox" id="sncomp"> ' + tr("Compress to a size I choose") + ' <span class="small dim">· ' + tr("optional") + "</span></label>";
+  const pl = snCPlan(it);
+  return '<div class="sn-comp glass"><div class="row"><label class="sn-check" style="color:var(--text)"><input type="checkbox" id="sncomp" checked> <b>' + tr("Compress to a size I choose") + '</b></label><span class="sp"></span><label class="sn-mb"><input id="snmb" inputmode="decimal" value="' + Math.max(1, Math.round(pl.bytes / 1e6)) + '"> MB</label></div>' +
+    '<input type="range" id="sncr" min="0" max="1000" value="' + pl.p + '"><div class="row small dim sn-ends"><span>' + tr("Smallest") + '</span><span class="sp"></span><span>' + tr("Best quality") + "</span></div>" +
+    '<div class="sn-cinfo" id="sncinfo">' + snCInfo(it, pl) + "</div></div>";
+}
+function snCInfo(it, pl) {
+  const orig = pl.src && pl.src.size ? pl.src.size * snFrac(it) : 0;
+  const same = orig && pl.bytes >= orig * 0.97;
+  return "<b>" + snSize(same ? orig : pl.bytes) + "</b> · " + (same ? (pl.src.height || pl.h) : pl.h) + "p · " + tr(pl.word) + (orig && !same ? ' <span class="dim">· ' + tr("instead of") + " ~" + snSize(orig) + "</span>" : "") +
+    '<div class="small dim" style="margin-top:3px">' + (same ? tr("That's the size of the normal download, so nothing needs compressing.") : tr("FreeTV downloads it, then compresses it to this size (H.264 MP4, plays everywhere).")) + "</div>";
+}
+const SN_SCIS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12"/></svg>';
+
+function snFrames(it) {
+  if (it.framesReq || !it.previewUrl || !snCanTrim(it)) return;
+  it.framesReq = true; it.frames = it.frames || []; SN.fkey = it.id; SN.fitem = it;
+  snCall("frames", { key: it.id, url: it.previewUrl, headers: it.previewHeaders || null, duration: it.duration, n: 10 });
+}
+function snFrame(e) {
+  const it = SN.fitem; if (!it || it.id !== e.key) return;
+  it.frames[e.i] = e.src; const el = $("#snf" + e.i); if (el) el.innerHTML = '<img src="' + e.src + '">';
+}
 async function snDetail(it) {
+  if (snCanTrim(it) && !it.trim) it.trim = { on: false, s: 0, e: Math.floor(it.duration), exact: false };
+  if (!it.comp) it.comp = { on: false, p: 700, mb: 0 };
   const draw = () => {
     const blocked = it.drm ? tr("This stream is DRM-protected. It can't be downloaded.") : it.live ? tr("This is a live stream. It can be previewed, not downloaded.") : "";
+    const can = !blocked && it.formats.length && !it.needsFormats, trim = can && snCanTrim(it), comp = trim && snVids(it).length;
     sheet('<div class="sn-detail"><div class="sn-dth">' + (it.thumbnail ? '<img referrerpolicy="no-referrer" src="' + esc(it.thumbnail) + '" onerror="this.remove()">' : "") + '<div class="sn-tags">' + snBadges(it) + "</div></div><h3>" + esc(it.title) + '</h3><div class="small dim">' + esc(it.site || "") + "</div>" +
       (it.description ? '<div class="small sn-desc">' + esc(it.description) + "</div>" : "") +
       '<div class="row" style="margin:12px 0 6px;gap:8px">' + (it.needsFormats ? "" : it.previewUrl && !it.drm ? '<button class="btn white" id="snprev">' + I.play + tr("Preview") + "</button>" : "") + "</div>" +
-      (it.needsFormats ? '<div class="spinner"></div>' : blocked ? '<div class="sn-note glass">' + esc(blocked) + "</div>" :
-        it.formats.length ? '<div class="small dim" style="margin:8px 0 6px">' + tr("Choose a quality to download") + '</div><div class="list">' + it.formats.map((f, i) => '<button class="item" data-f="' + i + '"><span style="flex:1;text-align:left">' + esc(/^Original file · /.test(f.label) ? tr("Original file · MKV").replace("MKV", f.label.split("· ")[1]) : tr(f.label)) +
-          (f.note ? ' <span class="dim small">' + esc(f.note) + "</span>" : "") + '</span><span class="dim small">' + esc([(f.out || f.audio || f.ext || "").toUpperCase(), (f.size ? "~" : "") + snSize(f.size)].filter(Boolean).join(" · ")) + "</span>" + I.dl + "</button>").join("") + "</div>" :
-          '<div class="sn-note glass">' + tr("Nothing downloadable was found for this item.") + "</div>") + "</div>");
+      (it.needsFormats ? '<div class="spinner"></div>' : blocked ? '<div class="sn-note glass">' + esc(blocked) + "</div>" : !it.formats.length ? '<div class="sn-note glass">' + tr("Nothing downloadable was found for this item.") + "</div>" :
+        (trim ? '<div id="sntrim">' + snTrimHtml(it) + "</div>" : "") + (comp ? '<div id="sncompbox">' + snCompHtml(it) + "</div>" : "") +
+        (comp && it.comp.on ? '<div class="row sn-go"><span class="small dim" id="sngoinfo"></span><span class="sp"></span><button class="btn white" id="sncgo">' + I.dl + '<span id="sncgol"></span></button></div>' : '<div id="snqual">' + snQualHtml(it) + "</div>")) + "</div>");
     const p = $("#snprev"); if (p) p.onclick = () => snPreview(it);
-    $$("#sheet [data-f]").forEach((b) => b.onclick = async () => { if (await snQueue(it, it.formats[+b.dataset.f])) closeSheet(); });
+    wire();
+  };
+  const extra = () => ({ section: it.trim && it.trim.on ? { start: it.trim.s, end: it.trim.e, exact: !!it.trim.exact } : null });
+  const goLabel = () => { const l = $("#sncgol"); if (!l) return; const pl = snCPlan(it); l.textContent = tr("Download") + " · " + snSize(pl.bytes) + (it.trim.on ? " · " + fmtTime(snPart(it)) : "");
+    const g = $("#sngoinfo"); if (g) g.textContent = it.trim.on ? tr("Only") + " " + fmtTime(it.trim.s) + " – " + fmtTime(it.trim.e) : tr("Whole video"); };
+  const paint = () => {                                   // move the handles and refresh every number that depends on the part, without redrawing the window
+    const t = it.trim, d = it.duration, tl = $("#sntl"); if (!t || !tl) return;
+    const a = t.s / d * 100, b = t.e / d * 100;
+    $(".sn-dim.l", tl).style.width = a + "%"; $(".sn-dim.r", tl).style.left = b + "%";
+    Object.assign($(".sn-sel", tl).style, { left: a + "%", width: (b - a) + "%" });
+    $(".sn-h.l", tl).style.left = a + "%"; $(".sn-h.r", tl).style.left = b + "%";
+    const f = $("#sntf"), e = $("#snte"); if (f && document.activeElement !== f) f.value = fmtTime(t.s); if (e && document.activeElement !== e) e.value = fmtTime(t.e);
+    $("#snlen").textContent = fmtTime(t.e - t.s);
+    const q = $("#snqual"); if (q) { q.innerHTML = snQualHtml(it); wireQual(); }
+    if (it.comp.on) { const pl = snCPlan(it); const ci = $("#sncinfo"); if (ci) ci.innerHTML = snCInfo(it, pl); const r = $("#sncr"); if (r) r.value = pl.p; const mb = $("#snmb"); if (mb && document.activeElement !== mb) mb.value = Math.max(1, Math.round(pl.bytes / 1e6)); goLabel(); }
+  };
+  const wireQual = () => $$("#sheet [data-f]").forEach((b) => b.onclick = async () => { if (await snQueue(it, it.formats[+b.dataset.f], false, extra())) closeSheet(); });
+  const wire = () => {
+    wireQual();
+    $$("#sheet [data-tw]").forEach((b) => b.onclick = () => { it.trim.on = b.dataset.tw === "1"; if (it.trim.on) snFrames(it); draw(); });
+    const tl = $("#sntl");
+    if (tl) {
+      paint();
+      const pop = $("#snpop"), tAt = (x) => { const r = tl.getBoundingClientRect(); return Math.max(0, Math.min(1, (x - r.left) / r.width)) * it.duration; };
+      const showPop = (t) => { const r = tl.getBoundingClientRect(), i = Math.min(9, Math.floor(t / it.duration * 10)), src = it.frames && it.frames[i];
+        pop.classList.remove("hidden"); pop.style.left = Math.max(70, Math.min(r.width - 70, t / it.duration * r.width)) + "px";
+        const pi = $(".pi", pop); if (pi.dataset.src !== (src || "")) { pi.dataset.src = src || ""; pi.innerHTML = src ? '<img src="' + src + '">' : ""; } $("span", pop).textContent = fmtTime(t); };
+      const set = (which, t) => { const T = it.trim; t = Math.round(t); if (which === "s") T.s = Math.max(0, Math.min(t, T.e - 1)); else T.e = Math.min(Math.floor(it.duration), Math.max(t, T.s + 1)); paint(); showPop(which === "s" ? T.s : T.e); };
+      let drag = null;
+      tl.onpointerdown = (e) => { const h = e.target.closest("[data-h]"); const t = tAt(e.clientX);
+        drag = h ? h.dataset.h : Math.abs(t - it.trim.s) <= Math.abs(t - it.trim.e) ? "s" : "e";
+        tl.setPointerCapture(e.pointerId); set(drag, t); e.preventDefault(); };
+      tl.onpointermove = (e) => { if (drag) set(drag, tAt(e.clientX)); };
+      tl.onpointerup = tl.onpointercancel = () => { drag = null; pop.classList.add("hidden"); };
+      $$(".sn-h", tl).forEach((h) => h.onkeydown = (e) => { const k = { ArrowLeft: -1, ArrowRight: 1 }[e.key]; if (!k) return; e.preventDefault(); set(h.dataset.h, (h.dataset.h === "s" ? it.trim.s : it.trim.e) + k * (e.shiftKey ? 10 : 1)); setTimeout(() => pop.classList.add("hidden"), 900); });
+      const inp = (el, which) => { el.onchange = () => { const v = snParseT(el.value); if (v == null) { toast("Write the time like 1:05:30"); } else { const T = it.trim; if (which === "s") T.s = Math.max(0, Math.min(v, T.e - 1)); else T.e = Math.min(Math.floor(it.duration), Math.max(v, T.s + 1)); }
+        el.value = fmtTime(which === "s" ? it.trim.s : it.trim.e); paint(); }; el.onkeydown = (e) => { if (e.key === "Enter") el.blur(); }; };
+      inp($("#sntf"), "s"); inp($("#snte"), "e");
+      $$("#sheet [data-tq]").forEach((b) => b.onclick = () => { const T = it.trim, d = Math.floor(it.duration), k = b.dataset.tq;
+        if (k === "first5") { T.s = 0; T.e = Math.min(d, 300); } else if (k === "last10") { T.e = d; T.s = Math.max(0, d - 600); } else { T.s = 0; T.e = d; } paint(); });
+      $$("#sheet [name=sncut]").forEach((r) => r.onchange = () => { it.trim.exact = r.value === "1"; $$("#sheet .sn-cut label").forEach((l) => l.classList.toggle("on", l.contains(r) ? r.checked : !r.checked)); });
+      const pv = $("#snpvp"); if (pv) pv.onclick = () => { closeSheet(); openPlayer({ kind: "movie", key: "snp:" + it.id, title: it.title + " (" + fmtTime(it.trim.s) + ")", url: it.previewUrl, headers: it.previewHeaders || undefined, group: tr("Web Sniffer"), logo: it.thumbnail, startAt: it.trim.s }); };
+    }
+    const cb = $("#sncomp"); if (cb) cb.onchange = () => { it.comp.on = cb.checked; if (cb.checked) { it.comp.mb = 0; } draw(); };
+    const cr = $("#sncr"); if (cr) cr.oninput = () => { it.comp.p = +cr.value; it.comp.mb = 0; const pl = snCPlan(it); $("#sncinfo").innerHTML = snCInfo(it, pl); const mb = $("#snmb"); if (mb) mb.value = Math.max(1, Math.round(pl.bytes / 1e6)); goLabel(); };
+    const mb = $("#snmb"); if (mb) { mb.onchange = () => { const v = parseFloat(String(mb.value).replace(",", ".")); if (!(v > 0)) { mb.value = Math.max(1, Math.round(snCPlan(it).bytes / 1e6)); return; }
+      it.comp.mb = 0; const max = snCMax(it), len = snPart(it), maxMB = max * 1000 / 8 * len / 1e6, minMB = SN_CMIN * 1000 / 8 * len / 1e6;
+      if (v > maxMB) { toast("That's more than the best quality – using the best quality"); it.comp.p = 1000; } else if (v < minMB) { toast("That's too small for a watchable video – using the smallest size"); it.comp.p = 0; } else it.comp.mb = v;
+      const pl = snCPlan(it); $("#sncr").value = pl.p; $("#sncinfo").innerHTML = snCInfo(it, pl); mb.value = Math.max(1, Math.round(pl.bytes / 1e6)); goLabel(); }; mb.onkeydown = (e) => { if (e.key === "Enter") mb.blur(); }; }
+    const go = $("#sncgo"); if (go) { goLabel(); go.onclick = async () => { const pl = snCPlan(it); if (!pl.src) return;
+      if (await snQueue(it, pl.src, false, { ...extra(), compress: { bytes: Math.round(pl.bytes), height: pl.h, abr: pl.abr } })) closeSheet(); }; }
   };
   draw();
-  if (it.needsFormats) { if (await snEnsureFormats(it)) { if (!$("#sheet").classList.contains("hidden")) draw(); } else closeSheet(); }
+  if (it.trim && it.trim.on) snFrames(it);
+  if (it.needsFormats) { if (await snEnsureFormats(it)) { if (snCanTrim(it) && !it.trim) it.trim = { on: false, s: 0, e: Math.floor(it.duration), exact: false }; if (!$("#sheet").classList.contains("hidden")) draw(); } else closeSheet(); }
 }
-async function snQueue(it, f, force) {
-  const r = await snCall("download", { title: it.title, thumbnail: it.thumbnail, pageUrl: it.pageUrl, site: it.site, duration: it.duration, format: f, force: !!force });
+async function snQueue(it, f, force, extra) {
+  const r = await snCall("download", { title: it.title, thumbnail: it.thumbnail, pageUrl: it.pageUrl, site: it.site, duration: it.duration, format: f, force: !!force, ...(extra || {}) });
   if (r && r.duplicate) {
     return new Promise((res) => {
       sheet("<h3>" + tr("Already in your downloads") + '</h3><div class="small dim" style="margin-bottom:10px">' + esc(it.title) + '</div><div class="list"><button class="item" id="sndup1">' + tr("Download again") + '</button><button class="item" id="sndup2">' + tr("Show downloads") + '</button><button class="item" id="sndup3">' + tr("Cancel") + "</button></div>");
-      $("#sndup1").onclick = async () => { closeSheet(); await snQueue(it, f, true); res(true); };
+      $("#sndup1").onclick = async () => { closeSheet(); await snQueue(it, f, true, extra); res(true); };
       $("#sndup2").onclick = () => { closeSheet(); SN.view = "downloads"; renderSniffer($("#view")); res(false); };
       $("#sndup3").onclick = () => { closeSheet(); res(false); };
     });
@@ -231,9 +357,10 @@ function snDrawJobs() {
   const btn = (a, l, j, cls) => '<button class="btn ' + (cls || "") + '" data-sa="' + a + '" data-sj="' + j.id + '">' + l + "</button>";
   const row = (j) => {
     const pct = j.total ? Math.min(100, Math.round(j.size / j.total * 100)) : 0, active = j.state === "downloading";
-    const info = j.state === "done" ? [snSize(j.size), j.label, j.site, j.converted === "hevc" ? tr("HEVC for Mac") : "", tr(j.note || "")].filter(Boolean).join(" · ") :
+    const cut = j.section ? "✂ " + fmtTime(j.section.start) + " – " + fmtTime(j.section.end) : "", cmp = j.compress ? (j.compressed ? tr("Compressed") + " " + snSize(j.compressed) : tr("Compress to") + " " + snSize(j.compress.bytes)) : "";
+    const info = j.state === "done" ? [snSize(j.size), j.label, cut, j.site, j.converted === "hevc" ? tr("HEVC for Mac") : "", j.compressed ? tr("Compressed") + " · " + j.compress.height + "p" : "", tr(j.note || "")].filter(Boolean).join(" · ") :
       [j.state === "queued" ? tr("Waiting") : j.state === "paused" ? tr("Paused") : j.state === "failed" ? tr("Failed") : j.state === "canceled" ? tr("Cancelled") : "", j.total ? pct + "%" : "", snSize(j.size) + (j.total ? " / " + snSize(j.total) : ""),
-        active && j.phase ? tr(j.phase) + " " + Math.round((j.phaseProgress || 0) * 100) + "%" : "", active && j.speed && !j.phase ? snSize(j.speed) + "/s" : "", active && j.eta ? snEta(j.eta) + " " + tr("left") : "", j.label, tr(j.error || "")].filter(Boolean).join(" · ");
+        active && j.phase ? tr(j.phase) + " " + Math.round((j.phaseProgress || 0) * 100) + "%" : "", active && j.speed && !j.phase ? snSize(j.speed) + "/s" : "", active && j.eta ? snEta(j.eta) + " " + tr("left") : "", j.label, cut, cmp, tr(j.error || "")].filter(Boolean).join(" · ");
     return '<div class="item sn-job"><div class="sn-jth">' + (j.thumbnail ? '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(j.thumbnail) + '" onerror="this.remove()">' : "") + '</div><div class="sn-jmain"><div class="sn-jt">' + esc(j.title) + '</div><div class="small ' + (j.state === "failed" ? "" : "dim") + '"' + (j.state === "failed" ? ' style="color:var(--bad)"' : "") + ">" + esc(info) + "</div>" +
       (j.state !== "done" && j.state !== "canceled" ? '<div class="prog sn-prog' + (active && !j.total ? " ind" : "") + '"><i style="width:' + pct + '%"></i></div>' : "") + '</div><div class="row sn-jbtn">' +
       (j.state === "done" ? btn("play", tr("Play"), j) + btn("conv", tr("Convert"), j) + btn("show", tr("Show in Finder"), j) : "") +
