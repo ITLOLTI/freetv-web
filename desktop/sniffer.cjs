@@ -768,13 +768,13 @@ exports.init = function init(ctx) {
   }
   // QuickTime / Finder / iPhone play H.264 and HEVC video with AAC/MP3/AC3 sound. Anything else gets fixed after download.
   const appleOk = (info) => (!info.v || /^(h264|hevc|mjpeg|prores)$/.test(info.v)) && (!info.a || /^(aac|mp3|alac|ac3|eac3)$/.test(info.a));
-  function makeAppleFriendly(j) {
+  function makeAppleFriendly(j, noHw) {
     return new Promise((resolve) => {
       if (!st.settings.apple || !/\.(mp4|m4v|mov|mkv|webm)$/i.test(j.file) || !fs.existsSync(j.file)) return resolve();
       const info = probe(j.file); if (appleOk(info)) return resolve();
       const out = j.file.replace(/\.(mkv|webm|mov|m4v)$/i, ".mp4"), tmp = out + ".mac.part";
       const okV = !info.v || /^(h264|hevc)$/.test(info.v);
-      const args = ["-hide_banner", "-nostdin", "-y", ...(okV ? [] : hwDec()), "-i", j.file, "-map", "0:v:0?", "-map", "0:a:0?",
+      const args = ["-hide_banner", "-nostdin", "-y", ...(okV || noHw ? [] : hwDec()), "-i", j.file, "-map", "0:v:0?", "-map", "0:a:0?",
         ...(okV ? ["-c:v", "copy", ...(info.v === "hevc" ? ["-tag:v", "hvc1"] : [])] : appleVideoArgs(info)),
         ...(info.a && !/^(aac|mp3|alac|ac3|eac3)$/.test(info.a) ? ["-c:a", "aac", "-b:a", "192k"] : ["-c:a", "copy"]),
         "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:1", "-nostats", tmp];
@@ -787,6 +787,7 @@ exports.init = function init(ctx) {
       p.on("close", (code) => {
         running.delete(j.id); j.phase = ""; j.phaseProgress = 0;
         if (code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 0) { try { if (out !== j.file) fs.unlinkSync(j.file); fs.renameSync(tmp, out); j.file = out; j.converted = okV ? "audio" : "hevc"; } catch (e) {} }
+        else if (!okV && !noHw && hwDec().length && !j.want) { try { fs.unlinkSync(tmp); } catch (e) {} return makeAppleFriendly(j, true).then(resolve); }     // the video chip couldn't read it: try with the processor
         else { try { fs.unlinkSync(tmp); } catch (e) {} if (!j.want) j.note = "Kept the original: it may not play in QuickTime. " + ((err.split("\n").filter((l) => /error|invalid/i.test(l)).pop() || "").slice(0, 120)); }
         resolve();
       });
@@ -804,7 +805,7 @@ exports.init = function init(ctx) {
       p.on("error", (e) => { running.delete(j.id); resolve({ code: -1, err: e.message }); });
     });
   }
-  async function compressToSize(j) {
+  async function compressToSize(j, noHw) {
     if (!fs.existsSync(j.file)) return;
     const info = probe(j.file), size = fs.statSync(j.file).size, len = info.duration || (j.section ? j.section.end - j.section.start : j.duration);
     if (!info.v || !len) return makeAppleFriendly(j);
@@ -815,7 +816,7 @@ exports.init = function init(ctx) {
     const out = j.file.replace(/\.[^.\/]+$/, "") + ".mp4", tmp = out + ".small.part", log = path.join(app.getPath("temp"), "ftv-2pass-" + j.id);
     const x264 = caps().has("libx264");
     const venc = x264 ? ["-c:v", "libx264", "-preset", "fast", "-b:v", vkb + "k"] : ["-c:v", "h264_videotoolbox", ...vtFast("h264_videotoolbox"), "-b:v", vkb + "k", "-maxrate", Math.round(vkb * 1.3) + "k", "-bufsize", vkb * 2 + "k"];
-    const base = ["-hide_banner", "-nostdin", "-y", ...hwDec(), "-i", j.file, "-map", "0:v:0", ...vf, ...venc, "-pix_fmt", "yuv420p"];
+    const base = ["-hide_banner", "-nostdin", "-y", ...(noHw ? [] : hwDec()), "-i", j.file, "-map", "0:v:0", ...vf, ...venc, "-pix_fmt", "yuv420p"];
     j.phase = "Compressing"; j.phaseProgress = 0; pushJobs();
     let r = { code: 0, err: "" };
     if (x264) {
@@ -828,6 +829,7 @@ exports.init = function init(ctx) {
     j.phase = ""; j.phaseProgress = 0;
     if (j.want) { try { fs.unlinkSync(tmp); } catch (e) {} return; }
     if (r.code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 0) { try { if (out !== j.file) fs.unlinkSync(j.file); fs.renameSync(tmp, out); j.file = out; j.compressed = fs.statSync(out).size; } catch (e) {} }
+    else if (!noHw && hwDec().length) { try { fs.unlinkSync(tmp); } catch (e) {} return compressToSize(j, true); }
     else { try { fs.unlinkSync(tmp); } catch (e) {} j.note = "Couldn't compress it – kept the original. " + ((r.err.split("\n").filter((l) => /error|invalid/i.test(l)).pop() || "").slice(0, 120)); await makeAppleFriendly(j); }
   }
   // --- small pictures along the trim timeline: one frame from each tenth of the video

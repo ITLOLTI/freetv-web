@@ -163,7 +163,8 @@ exports.init = (ctx) => {
     if (now) { clearTimeout(pushT); send(); } else if (!pushT) pushT = setTimeout(send, 400); };
   const safe = (s) => String(s || "clip").replace(/[\/\\:*?"<>|\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "clip";
   const tcode = (t) => { t = Math.floor(t); return (t >= 3600 ? Math.floor(t / 3600) + "-" : "") + String(Math.floor(t % 3600 / 60)).padStart(t >= 3600 ? 2 : 1, "0") + "-" + String(t % 60).padStart(2, "0"); };
-  function uniq(dir, base, ext) { let p = path.join(dir, base + ext), i = 2; while (fs.existsSync(p)) p = path.join(dir, base + " (" + i++ + ")" + ext); return p; }
+  function uniq(dir, base, ext) { const taken = (p) => fs.existsSync(p) || fs.existsSync(p + ".part") || X.jobs.some((j) => j.out === p && (j.state === "queued" || j.state === "exporting"));
+    let p = path.join(dir, base + ext), i = 2; while (taken(p)) p = path.join(dir, base + " (" + i++ + ")" + ext); return p; }
   function addExport({ file, clips, o }) {
     if (!file || !fs.existsSync(file)) throw new Error("The video can't be found.");
     if (!clips || !clips.length) throw new Error("Choose at least one clip.");
@@ -191,7 +192,8 @@ exports.init = (ctx) => {
   }
   function wrap(text, max) { const words = String(text).trim().split(/\s+/), lines = []; let l = ""; for (const w of words) { if ((l + " " + w).trim().length > max && l) { lines.push(l); l = w; } else l = (l + " " + w).trim(); } if (l) lines.push(l); return lines.slice(0, 3).join("\n"); }
   const fq = (p) => "'" + String(p).replace(/'/g, "") + "'";            // paths here are our temp files and system fonts: no quotes or colons in them
-  function exportArgs(j, info, tmpFiles) {
+  function exportArgs(j, info, tmpFiles, mode) {
+    mode = mode || { hw: true, x264: false };
     const o = j.o, len = j.end - j.start, small = o.quality === "720";
     let [W, Ht] = o.format === "square" ? [1080, 1080] : o.format === "horizontal" ? [1920, 1080] : [1080, 1920];
     if (small) { W = Math.round(W * 2 / 3 / 2) * 2; Ht = Math.round(Ht * 2 / 3 / 2) * 2; }
@@ -233,33 +235,49 @@ exports.init = (ctx) => {
     const audio = info.audio;
     if (audio) f.push(`[0:a]${o.loud ? "loudnorm=I=-14:TP=-1.5:LRA=11," : ""}${fade ? `afade=t=in:st=0:d=0.2,afade=t=out:st=${(len - 0.45).toFixed(2)}:d=0.45,` : ""}aresample=48000[aout]`);
     void n2;
-    const args = ["-hide_banner", "-nostdin", "-y", "-ss", String(j.start), "-t", String(len), ...hw(), "-i", j.file];
+    const args = ["-hide_banner", "-nostdin", "-y", "-ss", String(j.start), "-t", String(len), ...(mode.hw ? hw() : []), ...(mode.keep ? ["-reinit_filter", "0"] : []), "-i", j.file];
     if (inputs > 1) args.push("-i", o.logo);
     args.push("-filter_complex", f.join(";"), "-map", "[vout]", ...(audio ? ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"] : ["-an"]));
     const br = Math.round((W * Ht) / (1080 * 1920) * (o.fps === "60" ? 14000 : 10000));
-    if (C.vt) args.push("-c:v", "h264_videotoolbox", "-b:v", br + "k", "-maxrate", Math.round(br * 1.4) + "k", "-bufsize", br * 2 + "k", "-profile:v", "high");
+    if (C.vt && !mode.x264) args.push("-c:v", "h264_videotoolbox", "-b:v", br + "k", "-maxrate", Math.round(br * 1.4) + "k", "-bufsize", br * 2 + "k", "-profile:v", "high");
     else args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high");
     args.push("-movflags", "+faststart", "-progress", "pipe:1", "-nostats", "-f", "mp4", j.out + ".part");
     return args;
   }
-  function runExport(j) {
+  // ways to export, tried in order until one works: the video chip reads and writes; the processor reads, the chip writes; the processor does all of it
+  // keep: don't rebuild the filters when the picture changes size or format mid-video (recorded live streams do that); every branch scales to a fixed size anyway
+  function modes() { const C = caps(), m = []; if (process.platform === "darwin") m.push({ hw: true }); m.push({ hw: false }, { hw: false, keep: true }); if (C.vt && C.x264) m.push({ hw: false, keep: true, x264: true }); return m; }
+  const why = (err) => { const ls = err.split("\n").map((l) => l.replace(/^\[[^\]]+\]\s*/, "").trim()).filter(Boolean);
+    const bad = ls.filter((l) => /error|invalid|no such|not found|unable|failed|impossible|cannot/i.test(l) && !/^Error while processing the decoded data|^Conversion failed|^Error closing/i.test(l));
+    return (bad[0] || ls.filter((l) => /error/i.test(l)).pop() || "Export failed").slice(0, 200); };
+  function runOnce(j, args) {
     return new Promise((resolve) => {
-      const info = probe(j.file); const tmp = [];
-      let args; try { args = exportArgs(j, info, tmp); } catch (e) { Object.assign(j, { state: "failed", error: String(e.message || e) }); push(true); return resolve(); }
-      j.state = "exporting"; j.progress = 0; j.error = ""; push(true);
       const p = spawn(ff(), args, { stdio: ["ignore", "pipe", "pipe"] }); running.set(j.id, p);
       let err = ""; const len = j.end - j.start;
-      p.stderr.on("data", (d) => { err = (err + d).slice(-4000); });
+      p.stderr.on("data", (d) => { err = (err + d).slice(-12000); });
       p.stdout.on("data", (d) => { const m = [...String(d).matchAll(/out_time_(?:us|ms)=(\d+)/g)].pop(); if (m) { j.progress = Math.min(0.99, +m[1] / 1e6 / len); push(); } });
-      p.on("close", (code) => {
-        running.delete(j.id); for (const t of tmp) try { fs.unlinkSync(t); } catch (e) {}
-        if (j.state === "canceled") { try { fs.unlinkSync(j.out + ".part"); } catch (e) {} }
-        else if (code === 0 && fs.existsSync(j.out + ".part")) { try { fs.renameSync(j.out + ".part", j.out); j.size = fs.statSync(j.out).size; } catch (e) {} Object.assign(j, { state: "done", progress: 1 }); }
-        else { try { fs.unlinkSync(j.out + ".part"); } catch (e) {} Object.assign(j, { state: "failed", error: (err.split("\n").filter((l) => /error|invalid|no such|not found|unable/i.test(l)).pop() || "Export failed").slice(0, 200) }); }
-        push(true); resolve();
-      });
-      p.on("error", (e) => { running.delete(j.id); Object.assign(j, { state: "failed", error: e.message }); push(true); resolve(); });
+      p.on("close", (code) => { running.delete(j.id); resolve({ code, err }); });
+      p.on("error", (e) => { running.delete(j.id); resolve({ code: -1, err: e.message }); });
     });
+  }
+  async function runExport(j) {
+    const info = probe(j.file); let last = "";
+    j.state = "exporting"; j.progress = 0; j.error = ""; push(true);
+    for (const mode of modes()) {
+      const tmp = []; let args;
+      try { args = exportArgs(j, info, tmp, mode); } catch (e) { Object.assign(j, { state: "failed", error: String(e.message || e) }); push(true); return; }
+      const r = await runOnce(j, args);
+      for (const t of tmp) try { fs.unlinkSync(t); } catch (e) {}
+      if (j.state === "canceled") { try { fs.unlinkSync(j.out + ".part"); } catch (e) {} push(true); return; }
+      if (r.code === 0 && fs.existsSync(j.out + ".part") && fs.statSync(j.out + ".part").size > 1000) {
+        try { fs.renameSync(j.out + ".part", j.out); j.size = fs.statSync(j.out).size; } catch (e) {}
+        Object.assign(j, { state: "done", progress: 1 }); push(true); return;
+      }
+      try { fs.unlinkSync(j.out + ".part"); } catch (e) {}
+      last = why(r.err); j.progress = 0; push();
+      try { fs.mkdirSync(cacheDir, { recursive: true }); fs.writeFileSync(path.join(cacheDir, "last-export-error.txt"), JSON.stringify(mode) + "\n" + args.join(" ") + "\n\n" + r.err); } catch (e) {}
+    }
+    Object.assign(j, { state: "failed", error: last }); push(true);
   }
 
   // ------------------------------------------------------------ IPC
