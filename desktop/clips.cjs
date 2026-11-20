@@ -172,13 +172,16 @@ exports.init = (ctx) => {
     if (!clips || !clips.length) throw new Error("Choose at least one clip.");
     if (o.logo && o.logoOn && !fs.existsSync(o.logo)) throw new Error("The logo file can't be found.");
     if (o.srt && o.subsOn && !fs.existsSync(o.srt)) throw new Error("The subtitle file can't be found.");
-    const dir = o.folder || path.join(ctx.getFolder(), "Clips"); fs.mkdirSync(dir, { recursive: true });
+    if (o.musicOn && o.music && !fs.existsSync(o.music)) throw new Error("The music file can't be found.");
     const base = safe(path.basename(file, path.extname(file)));
+    const split = o.mode === "split", dir = path.join(o.folder || path.join(ctx.getFolder(), "Clips"), split ? base : ""); fs.mkdirSync(dir, { recursive: true });
+    const total = clips.reduce((m, c) => Math.max(m, c.total || c.n || 0), 0) || clips.length, digits = String(total).length < 2 ? 2 : String(total).length;
     const added = [];
     clips.forEach((c, i) => {
       const s = Math.max(0, +c.start || 0), e = Math.max(s + 1, +c.end || 0);
-      const out = uniq(dir, base + " – clip " + (c.n || i + 1) + " (" + tcode(s) + ")", ".mp4");
-      const j = { id: "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), file, out, start: s, end: e, n: c.n || i + 1, title: c.title || "", o: { ...o }, state: "queued", progress: 0, created: Date.now() };
+      const n = c.n || i + 1;
+      const out = uniq(dir, split ? safe(String(o.partWord || "Part").trim() || "Part") + " " + String(n).padStart(digits, "0") : base + " – clip " + n + " (" + tcode(s) + ")", ".mp4");
+      const j = { id: "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), file, out, start: s, end: e, n, total, title: c.title || "", o: { ...o }, state: "queued", progress: 0, created: Date.now() };
       X.jobs.unshift(j); added.push(j.id);
     });
     push(true); pumpX(); return { added };
@@ -194,6 +197,23 @@ exports.init = (ctx) => {
   }
   function wrap(text, max) { const words = String(text).trim().split(/\s+/), lines = []; let l = ""; for (const w of words) { if ((l + " " + w).trim().length > max && l) { lines.push(l); l = w; } else l = (l + " " + w).trim(); } if (l) lines.push(l); return lines.slice(0, 3).join("\n"); }
   const fq = (p) => "'" + String(p).replace(/'/g, "") + "'";            // paths here are our temp files and system fonts: no quotes or colons in them
+  // ------------------------------------------------------------ fonts: the Mac's own, by name (the preview uses the same family names)
+  const FONT_LIST = [
+    ["Arial Black", "Arial Black", "/System/Library/Fonts/Supplemental/Arial Black.ttf"], ["Arial Bold", "Arial", "/System/Library/Fonts/Supplemental/Arial Bold.ttf"],
+    ["Impact", "Impact", "/System/Library/Fonts/Supplemental/Impact.ttf"], ["Helvetica Bold", "Helvetica", "/System/Library/Fonts/Helvetica.ttc"],
+    ["Futura", "Futura", "/System/Library/Fonts/Supplemental/Futura.ttc"], ["Avenir Next", "Avenir Next", "/System/Library/Fonts/Avenir Next.ttc"],
+    ["Verdana Bold", "Verdana", "/System/Library/Fonts/Supplemental/Verdana Bold.ttf"], ["Trebuchet Bold", "Trebuchet MS", "/System/Library/Fonts/Supplemental/Trebuchet MS Bold.ttf"],
+    ["Georgia Bold", "Georgia", "/System/Library/Fonts/Supplemental/Georgia Bold.ttf"], ["Times Bold", "Times New Roman", "/System/Library/Fonts/Supplemental/Times New Roman Bold.ttf"],
+    ["Courier Bold", "Courier New", "/System/Library/Fonts/Supplemental/Courier New Bold.ttf"], ["American Typewriter", "American Typewriter", "/System/Library/Fonts/Supplemental/AmericanTypewriter.ttc"],
+    ["Comic Sans Bold", "Comic Sans MS", "/System/Library/Fonts/Supplemental/Comic Sans MS Bold.ttf"], ["Chalkboard", "Chalkboard SE", "/System/Library/Fonts/Supplemental/ChalkboardSE.ttc"],
+    ["Marker Felt", "Marker Felt", "/System/Library/Fonts/Supplemental/MarkerFelt.ttc"], ["Noteworthy", "Noteworthy", "/System/Library/Fonts/Supplemental/Noteworthy.ttc"],
+    ["Rockwell Bold", "Rockwell", "/System/Library/Fonts/Supplemental/Rockwell.ttc"], ["Copperplate", "Copperplate", "/System/Library/Fonts/Supplemental/Copperplate.ttc"],
+    ["DejaVu Sans Bold", "DejaVu Sans", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"], ["DejaVu Serif Bold", "DejaVu Serif", "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"]];
+  const fonts = () => FONT_LIST.filter(([, , f]) => { try { return fs.existsSync(f); } catch (e) { return false; } }).map(([name, family, file]) => ({ name, family, file }));
+  const fontFor = (o) => (o.fontFile && fs.existsSync(o.fontFile) ? o.fontFile : "") || font();
+  const hex = (c, d) => { const m = /^#?([0-9a-f]{6})$/i.exec(String(c || "")); return "0x" + (m ? m[1] : d).toUpperCase(); };
+  const assColor = (c, d) => { const h = hex(c, d).slice(2); return "&H00" + h.slice(4, 6) + h.slice(2, 4) + h.slice(0, 2); };
+  const partText = (o, n, total) => { const w = String(o.partWord || "Part").trim() || "Part"; return o.numberStyle === "short" ? w + " " + n : o.numberStyle === "slash" ? n + "/" + (total || n) : w + " " + n + (total ? " / " + total : ""); };
   function exportArgs(j, info, tmpFiles, mode) {
     mode = mode || { hw: true, x264: false };
     const o = j.o, len = j.end - j.start, small = o.quality === "720";
@@ -201,47 +221,74 @@ exports.init = (ctx) => {
     if (small) { W = Math.round(W * 2 / 3 / 2) * 2; Ht = Math.round(Ht * 2 / 3 / 2) * 2; }
     const vert = o.format !== "horizontal" && o.format !== "square", f = [], C = caps();
     const fps = o.fps === "30" || o.fps === "60" ? "fps=" + o.fps + "," : "";
-    if (o.fit === "fill") { const pos = Math.max(0, Math.min(1, (+o.cropPos || 50) / 100)); f.push(`[0:v]${fps}scale=${W}:${Ht}:force_original_aspect_ratio=increase,crop=${W}:${Ht}:(iw-ow)*${pos}:(ih-oh)/2,setsar=1[v0]`); }
-    else if (o.fit === "bars") f.push(`[0:v]${fps}scale=${W}:${Ht}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${W}:${Ht}:(ow-iw)/2:(oh-ih)/2:black,setsar=1[v0]`);
+    if (o.fit === "fill") { const pos = Math.max(0, Math.min(1, (o.cropPos == null ? 50 : +o.cropPos) / 100)); f.push(`[0:v]${fps}scale=${W}:${Ht}:force_original_aspect_ratio=increase,crop=${W}:${Ht}:(iw-ow)*${pos}:(ih-oh)/2,setsar=1[v0]`); }
+    else if (o.fit === "bars") f.push(`[0:v]${fps}scale=${W}:${Ht}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${W}:${Ht}:(ow-iw)/2:(oh-ih)/2:${hex(o.bgColor, "000000")},setsar=1[v0]`);
     else { const bw = Math.round(W / 4 / 2) * 2, bh = Math.round(Ht / 4 / 2) * 2, zoom = Math.max(0.6, Math.min(1.6, (+o.zoom || 100) / 100));
       const fw = Math.round(W * zoom / 2) * 2, fh = Math.round(Ht * zoom / 2) * 2;
       f.push(`[0:v]${fps}split=2[bgs][fgs]`, `[bgs]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},boxblur=10:2,scale=${W}:${Ht},eq=brightness=-0.07:saturation=1.15[bg]`,
         `[fgs]scale=${fw}:${fh}:force_original_aspect_ratio=decrease:force_divisible_by=2[fg]`, `[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[v0]`); }
     let cur = "v0"; const next = () => "v" + (f.length + 1);
+    const fam = (fonts().find((x) => x.file === fontFor(o)) || {}).family || "Arial";
     if (o.subsOn && o.srt && C.subtitles) {
       const body = srtShift(fs.readFileSync(o.srt, "utf8"), j.start, j.end);
       if (body.trim()) {                                       // no subtitle lines inside this clip: nothing to burn in
-      const t = path.join(os.tmpdir(), "ftv-clip-" + j.id + ".srt"); fs.writeFileSync(t, body); tmpFiles.push(t);
-      const big = o.subsSize === "big", fs1 = vert ? (big ? 17 : 13) : (big ? 22 : 17), mv = vert ? Math.round(288 * 0.2) : 22;
-      const n1 = next(); f.push(`[${cur}]subtitles=filename=${fq(t)}:force_style='Fontname=Arial,Bold=1,Fontsize=${fs1},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2.2,Shadow=0,Alignment=2,MarginV=${mv}'[${n1}]`); cur = n1;
+        const t = path.join(os.tmpdir(), "ftv-clip-" + j.id + ".srt"); fs.writeFileSync(t, body); tmpFiles.push(t);
+        const big = o.subsSize === "big", fs1 = vert ? (big ? 17 : 13) : (big ? 22 : 17);
+        const mv = Math.round(288 * Math.max(2, Math.min(80, o.subsPos == null ? (vert ? 20 : 8) : +o.subsPos)) / 100);
+        const n1 = next(); f.push(`[${cur}]subtitles=filename=${fq(t)}:force_style='Fontname=${fam.replace(/[',]/g, "")},Bold=1,Fontsize=${fs1},PrimaryColour=${assColor(o.subsColor, "FFFFFF")},OutlineColour=${assColor(o.outlineColor, "000000")},BorderStyle=1,Outline=2.2,Shadow=0,Alignment=2,MarginV=${mv}'[${n1}]`); cur = n1;
       }
     }
-    const title = [o.titleOn && (j.title || o.title) ? (j.title || o.title) : "", o.numberOn ? "Part " + j.n : ""].filter(Boolean);
-    if (title.length && C.drawtext) {
-      const size = Math.round(W * (vert ? 0.068 : 0.045)), maxc = Math.max(10, Math.floor(W / (size * 0.58)));
-      const lines = title.map((x) => wrap(x, maxc)).join("\n").split("\n"), gap = Math.round(size * 1.22), y0 = vert ? Math.round(Ht * 0.1) : Math.round(Ht * 0.06);
-      lines.forEach((line, k) => {                             // one centred line each: drawtext alone would left-align a block of lines
-        const t = path.join(os.tmpdir(), "ftv-clip-" + j.id + "-" + k + ".txt"); fs.writeFileSync(t, line); tmpFiles.push(t);
-        const n1 = next(); f.push(`[${cur}]drawtext=fontfile=${fq(font())}:textfile=${fq(t)}:expansion=none:fontsize=${size}:fontcolor=white:borderw=${Math.max(2, Math.round(size * 0.09))}:bordercolor=black@0.9:x=(w-text_w)/2:y=${y0 + k * gap}${o.titleBox ? `:box=1:boxcolor=black@0.55:boxborderw=${Math.round(size * 0.3)}` : ""}[${n1}]`); cur = n1;
+    const fontFile = fontFor(o), pad = Math.round(W * 0.03);
+    const textAt = (lines, size, X, Y, extra) => {             // centred lines around (X, Y) in % of the picture; kept inside the frame
+      const gap = Math.round(size * 1.22), y0 = Math.max(pad, Math.min(Ht - pad - lines.length * gap, Math.round(Ht * Y / 100 - lines.length * gap / 2)));
+      const ow = o.outline === false ? 0 : Math.max(2, Math.round(size * 0.09 * (o.outlineWidth == null ? 100 : +o.outlineWidth) / 100));
+      lines.forEach((line, k) => {
+        const t = path.join(os.tmpdir(), "ftv-clip-" + j.id + "-" + f.length + ".txt"); fs.writeFileSync(t, line); tmpFiles.push(t);
+        const n1 = next(); f.push(`[${cur}]drawtext=fontfile=${fq(fontFile)}:textfile=${fq(t)}:expansion=none:fontsize=${size}:fontcolor=${hex(o.textColor, "FFFFFF")}` +
+          (ow ? `:borderw=${ow}:bordercolor=${hex(o.outlineColor, "000000")}@0.95` : "") +
+          `:x='max(${pad},min(w-text_w-${pad},${Math.round(W * X / 100)}-text_w/2))':y=${y0 + k * gap}` +
+          (o.titleBox ? `:box=1:boxcolor=${hex(o.boxColor, "000000")}@${Math.max(0.05, Math.min(1, (o.boxOpacity == null ? 60 : +o.boxOpacity) / 100)).toFixed(2)}:boxborderw=${Math.round(size * 0.3)}` : "") + (extra || "") + `[${n1}]`); cur = n1;
       });
+    };
+    const title = [o.titleOn && (j.title || o.title) ? (j.title || o.title) : "", o.numberOn ? partText(o, j.n, j.total) : ""].filter(Boolean);
+    if (title.length && C.drawtext) {
+      const size = Math.round(W * (vert ? 0.068 : 0.045) * Math.max(0.4, Math.min(2.5, (+o.titleSize || 100) / 100))), maxc = Math.max(8, Math.floor(W * 0.92 / (size * 0.58)));
+      textAt(title.map((x) => wrap(x, maxc)).join("\n").split("\n").slice(0, 5), size, o.titleX == null ? 50 : +o.titleX, o.titleY == null ? (vert ? 12 : 9) : +o.titleY);
     }
-    let inputs = 1;
+    if (o.nextOn && C.drawtext && j.total && j.n < j.total && len > 5) {        // "Part 4 →" in the last 3 seconds, so viewers look for the next one
+      const size = Math.round(W * (vert ? 0.06 : 0.04));
+      textAt([String(o.partWord || "Part").trim() + " " + (j.n + 1) + " →"], size, 50, vert ? 70 : 78, `:enable='gte(t,${(len - 3).toFixed(2)})'`);
+    }
+    const inputs = [];
     if (o.logoOn && o.logo) {
-      inputs++; const lw = Math.max(16, Math.round(W * Math.max(4, Math.min(40, +o.logoSize || 14)) / 100 / 2) * 2), op = Math.max(0.1, Math.min(1, (+o.logoOpacity || 100) / 100));
+      inputs.push(["-i", o.logo]); const li = inputs.length;
+      const lw = Math.max(16, Math.round(W * Math.max(4, Math.min(40, +o.logoSize || 14)) / 100 / 2) * 2), op = Math.max(0.1, Math.min(1, (+o.logoOpacity || 100) / 100));
       const m = Math.round(W * 0.045), top = vert ? Math.round(Ht * 0.06) : m, bot = vert ? Math.round(Ht * 0.16) : m;   // vertical: stay clear of the Shorts / Reels buttons at the bottom
       const pos = { tl: [`${m}`, `${top}`], tr: [`W-w-${m}`, `${top}`], bl: [`${m}`, `H-h-${bot}`], br: [`W-w-${m}`, `H-h-${bot}`], tc: ["(W-w)/2", `${top}`], bc: ["(W-w)/2", `H-h-${bot}`] }[o.corner || "br"] || [`W-w-${m}`, `H-h-${bot}`];
-      f.push(`[1:v]scale=${lw}:-1,format=rgba,colorchannelmixer=aa=${op.toFixed(2)}[lg]`); const n1 = next(); f.push(`[${cur}][lg]overlay=${pos[0]}:${pos[1]}:format=auto[${n1}]`); cur = n1;
+      f.push(`[${li}:v]scale=${lw}:-1,format=rgba,colorchannelmixer=aa=${op.toFixed(2)}[lg]`); const n1 = next(); f.push(`[${cur}][lg]overlay=${pos[0]}:${pos[1]}:format=auto[${n1}]`); cur = n1;
     }
-    const fade = o.fade && len > 3, n2 = next();
+    const fade = o.fade && len > 3;
     f.push(`[${cur}]${fade ? `fade=t=in:st=0:d=0.25,fade=t=out:st=${(len - 0.45).toFixed(2)}:d=0.45,` : ""}format=yuv420p[vout]`);
-    const audio = info.audio;
-    // always plain stereo 48 kHz for AAC: some videos have sound with no channel layout (or 5.1, mono) that the encoder won't take as it is
+    // sound: the video's own (any channel layout → stereo), your music under it, or both
+    const music = o.musicOn && o.music && fs.existsSync(o.music);
     const toStereo = info.achans ? `pan=stereo|c0=c0|c1=c${Math.min(1, info.achans - 1)},` : "";
-    if (audio) f.push(`[0:a]${toStereo}${o.loud ? "loudnorm=I=-14:TP=-1.5:LRA=11," : ""}${fade ? `afade=t=in:st=0:d=0.2,afade=t=out:st=${(len - 0.45).toFixed(2)}:d=0.45,` : ""}aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
-    void n2;
+    const ov = Math.max(0, Math.min(2, (o.origVolume == null ? 100 : +o.origVolume) / 100)), mvol = Math.max(0, Math.min(2, (o.musicVolume == null ? 20 : +o.musicVolume) / 100));
+    const finish = `${o.loud ? "loudnorm=I=-14:TP=-1.5:LRA=11," : ""}${fade ? `afade=t=in:st=0:d=0.2,afade=t=out:st=${(len - 0.6).toFixed(2)}:d=0.6,` : ""}aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`;
+    const orig = info.audio && ov > 0;
+    let audio = false;
+    if (music) {
+      inputs.push(["-stream_loop", "-1", "-ss", String(Math.max(0, +o.musicStart || 0)), "-i", o.music]); const mi = inputs.length;
+      f.push(`[${mi}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,atrim=0:${len.toFixed(2)},volume=${mvol.toFixed(2)}[mus]`);
+      if (orig) {
+        f.push(`[0:a]${toStereo}aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,volume=${ov.toFixed(2)}[org]`);
+        if (o.duck !== false) { f.push(`[org]asplit=2[org1][org2]`, `[mus][org2]sidechaincompress=threshold=0.04:ratio=6:attack=20:release=400[musd]`, `[org1][musd]amix=inputs=2:duration=first:normalize=0,${finish}`); }
+        else f.push(`[org][mus]amix=inputs=2:duration=first:normalize=0,${finish}`);
+      } else f.push(`[mus]${finish}`);
+      audio = true;
+    } else if (orig) { f.push(`[0:a]${toStereo}${ov !== 1 ? `volume=${ov.toFixed(2)},` : ""}${finish}`); audio = true; }
     const args = ["-hide_banner", "-nostdin", "-y", "-ss", String(j.start), "-t", String(len), ...(mode.hw ? hw() : []), ...(mode.keep ? ["-reinit_filter", "0"] : []), "-i", j.file];
-    if (inputs > 1) args.push("-i", o.logo);
-    args.push("-filter_complex", f.join(";"), "-map", "[vout]", ...(audio ? ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"] : ["-an"]));
+    for (const a of inputs) args.push(...a);
+    args.push("-filter_complex", f.join(";"), "-map", "[vout]", ...(audio ? ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"] : ["-an"]), "-t", String(len));
     const br = Math.round((W * Ht) / (1080 * 1920) * (o.fps === "60" ? 14000 : 10000));
     if (C.vt && !mode.x264) args.push("-c:v", "h264_videotoolbox", "-b:v", br + "k", "-maxrate", Math.round(br * 1.4) + "k", "-bufsize", br * 2 + "k", "-profile:v", "high");
     else args.push("-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-profile:v", "high");
@@ -290,6 +337,9 @@ exports.init = (ctx) => {
   H("clipsOpen", async ({ file }) => { if (!file || !fs.existsSync(file)) throw new Error("The video can't be found."); allow(file); const i = probe(file); return { ...i, size: fs.statSync(file).size }; });
   H("clipsPickVideo", async () => { const f = await pick1("Choose a long video", [{ name: "Video", extensions: ["mp4", "mov", "m4v", "mkv", "webm", "avi", "ts", "mts", "m2ts", "flv", "wmv", "mpg", "mpeg"] }, { name: "All files", extensions: ["*"] }]); if (f) allow(f); return { file: f }; });
   H("clipsPickLogo", async () => { const f = await pick1("Choose your logo", [{ name: "Image", extensions: ["png", "webp", "jpg", "jpeg"] }]); if (f) allow(f); return { file: f }; });
+  H("clipsFonts", async () => ({ fonts: fonts() }));
+  H("clipsPickMusic", async () => { const f = await pick1("Choose music", [{ name: "Audio", extensions: ["mp3", "m4a", "aac", "wav", "aiff", "aif", "flac", "ogg", "opus", "caf"] }]); if (f) allow(f); return { file: f, duration: f ? probe(f).duration : 0 }; });
+  H("clipsPickFont", async () => { const f = await pick1("Choose a font", [{ name: "Font", extensions: ["ttf", "otf", "ttc"] }]); if (f) allow(f); return { file: f }; });
   H("clipsPickSrt", async () => ({ file: await pick1("Choose subtitles (.srt)", [{ name: "Subtitles", extensions: ["srt"] }]) }));
   H("clipsPickFolder", async () => ({ folder: await pick1("Where to save the clips", undefined, ["openDirectory", "createDirectory"]) }));
   H("clipsAllow", async ({ file }) => { if (file && fs.existsSync(file)) allow(file); return {}; });
@@ -299,5 +349,5 @@ exports.init = (ctx) => {
   H("clipsJobs", async () => ({ jobs: X.jobs.slice(0, 80), folder: path.join(ctx.getFolder(), "Clips") }));
   H("clipsStop", async ({ id }) => { const j = X.jobs.find((x) => x.id === id); if (!j) return {}; const p = running.get(id); j.state = "canceled"; if (p) try { p.kill("SIGKILL"); } catch (e) {} push(true); return {}; });
   H("clipsRemove", async ({ id }) => { X.jobs = X.jobs.filter((x) => x.id !== id || running.has(id)); push(true); return {}; });
-  return { stopAll: () => { cancelAnalyze(); for (const p of running.values()) try { p.kill("SIGKILL"); } catch (e) {} }, _test: { probe, measure, pick, exportArgs, addExport, X, caps, srtShift, analyze } };
+  return { stopAll: () => { cancelAnalyze(); for (const p of running.values()) try { p.kill("SIGKILL"); } catch (e) {} }, _test: { probe, measure, pick, exportArgs, fonts, partText, addExport, X, caps, srtShift, analyze } };
 };
