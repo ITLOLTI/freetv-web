@@ -261,7 +261,7 @@ async function handle(req, res, port) {
   }
   if (u.pathname === "/local") {                             // play downloaded / recorded files
     const p = path.resolve(u.searchParams.get("p") || "");
-    if (!p.startsWith(path.resolve(cfg.folder))) { res.writeHead(403); return res.end(); }
+    if (!p.startsWith(path.resolve(cfg.folder)) && !extraLocal.has(p)) { res.writeHead(403); return res.end(); }
     return serveFile(req, res, p);
   }
   let p = path.normalize(decodeURIComponent(u.pathname)).replace(/^([/\\])+/, "");
@@ -303,6 +303,10 @@ ipcMain.handle("ftv:open", (_, file) => shell.openPath(file || cfg.folder));
 
 // ---------------------------------------------------------------- Web Sniffer (separate module, see sniffer.cjs)
 let sniffer = null;
+// files the user picked in the Clips tab may live outside the FreeTV folder: those (and only those) may be played too
+const extraLocal = new Set();
+let clips = null;
+try { clips = require("./clips.cjs").init({ app, ipcMain, dialog, getWin: () => win, ffmpegPath, getFolder: () => cfg.folder, allowLocal: (p) => extraLocal.add(path.resolve(p)) }); } catch (e) { logErr("clips", e); }
 try { sniffer = require("./sniffer.cjs").init({ app, ipcMain, dialog, shell, BrowserWindow, session, WebContentsView: electron.WebContentsView, BrowserView: electron.BrowserView, getWin: () => win, ffmpegPath, getFolder: () => cfg.folder }); } catch (e) { logErr("sniffer", e); }
 
 app.whenReady().then(async () => { try {
@@ -325,4 +329,4 @@ app.whenReady().then(async () => { try {
   win.loadURL("http://127.0.0.1:" + port + "/");
 } catch (e) { const m = logErr("start", e); dialog.showErrorBox("FreeTV could not start", m); app.quit(); } });
 app.on("window-all-closed", () => app.quit());
-app.on("before-quit", () => { if (sniffer) sniffer.stopAll(); for (const r of running.values()) try { r.kill(); } catch (e) {} for (const s of sessions.values()) try { s.proc.kill("SIGKILL"); } catch (e) {} saveCfg(); });
+app.on("before-quit", () => { if (sniffer) sniffer.stopAll(); if (clips) clips.stopAll(); for (const r of running.values()) try { r.kill(); } catch (e) {} for (const s of sessions.values()) try { s.proc.kill("SIGKILL"); } catch (e) {} saveCfg(); });

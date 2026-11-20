@@ -1,7 +1,7 @@
 {
   "name": "freetv-mac",
   "productName": "FreeTV",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "FreeTV for Mac – IPTV player with recording, downloads, web media sniffer and converter",
   "main": "main.cjs",
   "author": "ITLOLTI",
@@ -26,6 +26,7 @@
       "main.cjs",
       "preload.cjs",
       "sniffer.cjs",
+      "clips.cjs",
       "bin/**",
       "app/**",
       "node_modules/ffmpeg-static/**",

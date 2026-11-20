@@ -17,6 +17,7 @@ async function snInit() {
     if (e.type === "browse") { SN.bcount = e.count; if (!e.count) { SN.bres = null; SN.bopen = false; } if (snVisible() && SN.view === "browse") { snBrowseBtn(); if (!e.count) snBrowsePanel(); } }
     if (e.type === "toast") toast(e.msg);
     if (e.type === "frame") snFrame(e);
+    if (/^clips/.test(e.type) && typeof clEvent === "function") clEvent(e);
     if (e.type === "bnav") snBrowseNav(e);
     if (e.type === "bclick" && S.tab === "sniffer" && SN.view === "browse") { SN.bres = null; snBrowseLoad(); }
     if (e.type === "conv") { SN.conv = e.conv; if (cvVisible()) { snDrawConv(); if (e.conv.some((c) => c.state === "done") && $("#cvrecent")) cvDrawFiles(); } }
@@ -363,7 +364,7 @@ function snDrawJobs() {
         active && j.phase ? tr(j.phase) + " " + Math.round((j.phaseProgress || 0) * 100) + "%" : "", active && j.speed && !j.phase ? snSize(j.speed) + "/s" : "", active && j.eta ? snEta(j.eta) + " " + tr("left") : "", j.label, cut, cmp, tr(j.error || "")].filter(Boolean).join(" · ");
     return '<div class="item sn-job"><div class="sn-jth">' + (j.thumbnail ? '<img loading="lazy" referrerpolicy="no-referrer" src="' + esc(j.thumbnail) + '" onerror="this.remove()">' : "") + '</div><div class="sn-jmain"><div class="sn-jt">' + esc(j.title) + '</div><div class="small ' + (j.state === "failed" ? "" : "dim") + '"' + (j.state === "failed" ? ' style="color:var(--bad)"' : "") + ">" + esc(info) + "</div>" +
       (j.state !== "done" && j.state !== "canceled" ? '<div class="prog sn-prog' + (active && !j.total ? " ind" : "") + '"><i style="width:' + pct + '%"></i></div>' : "") + '</div><div class="row sn-jbtn">' +
-      (j.state === "done" ? btn("play", tr("Play"), j) + btn("conv", tr("Convert"), j) + btn("show", tr("Show in Finder"), j) : "") +
+      (j.state === "done" ? btn("play", tr("Play"), j) + btn("conv", tr("Convert"), j) + (j.audio ? "" : btn("clips", tr("Make clips"), j)) + btn("show", tr("Show in Finder"), j) : "") +
       (active || j.state === "queued" ? btn("pause", tr("Pause"), j) + btn("cancel", tr("Cancel"), j) : "") +
       (j.state === "paused" ? btn("resume", tr("Resume"), j) + btn("cancel", tr("Cancel"), j) : "") + (j.state === "failed" || j.state === "canceled" ? btn("resume", tr("Try again"), j) : "") + (j.state !== "downloading" ? btn("del", "✕", j) : "") + "</div></div>";
   };
@@ -376,6 +377,7 @@ function snJobClick(e) {
   if (a === "show") DESK.show(j.file);
   if (a === "play") openPlayer({ kind: "movie", key: "f:" + j.id, title: j.title, url: location.origin + "/local?p=" + encodeURIComponent(j.file), localFile: j.file, group: tr("Web Sniffer") });
   if (a === "conv") { cvAdd([j.file]); go("convert"); }
+  if (a === "clips") { go("clips"); clOpen(j.file); }
   if (a === "del") {
     if (j.state !== "done") return snCall("remove", { id: j.id, deleteFile: false });
     sheet("<h3>" + esc(j.title) + '</h3><div class="list"><button class="item" id="dkeep">' + tr("Remove from list (keep the file)") + '</button><button class="item" id="dboth" style="color:var(--bad)">' + tr("Delete the file too") + "</button></div>");
@@ -498,4 +500,4 @@ function snDrawConv() {
 }
 // files dropped anywhere outside the drop zone must not make the window navigate away
 document.addEventListener("dragover", (e) => { if (window.ftvDesktop) e.preventDefault(); });
-document.addEventListener("drop", (e) => { if (!window.ftvDesktop) return; e.preventDefault(); if (S.tab === "convert" && e.dataTransfer.files.length) { cvAdd([...e.dataTransfer.files].map((f) => window.ftvDesktop.pathForFile(f))); cvDrawFiles(); } });
+document.addEventListener("drop", (e) => { if (!window.ftvDesktop) return; e.preventDefault(); if (S.tab === "convert" && e.dataTransfer.files.length) { cvAdd([...e.dataTransfer.files].map((f) => window.ftvDesktop.pathForFile(f))); cvDrawFiles(); } if (S.tab === "clips" && e.dataTransfer.files.length && typeof clOpen === "function") clOpen(window.ftvDesktop.pathForFile(e.dataTransfer.files[0])); });
