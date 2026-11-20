@@ -35,7 +35,9 @@ exports.init = (ctx) => {
     try {
       const t = spawnSync(ff(), ["-hide_banner", "-i", file], { encoding: "utf8", timeout: 20000 }).stderr || "";
       const d = /Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(t), vl = (/Stream #[^\n]*Video: (?![^\n]*attached pic)[^\n]*/.exec(t) || [""])[0], wh = /, (\d{2,5})x(\d{2,5})[, ]/.exec(vl);
-      return { duration: d ? +d[1] * 3600 + +d[2] * 60 + +d[3] : 0, video: !!vl, audio: /Stream #[^\n]*Audio:/.test(t), width: wh ? +wh[1] : 0, height: wh ? +wh[2] : 0 };
+      const al = (/Stream #[^\n]*Audio:[^\n]*/.exec(t) || [""])[0], ch = /, (\d+) channels/.exec(al);
+      return { duration: d ? +d[1] * 3600 + +d[2] * 60 + +d[3] : 0, video: !!vl, audio: !!al, width: wh ? +wh[1] : 0, height: wh ? +wh[2] : 0,
+        achans: ch ? +ch[1] : 0 };                               // "N channels" = channels without a known layout
     } catch (e) { return { duration: 0, video: false, audio: false, width: 0, height: 0 }; }
   }
 
@@ -233,7 +235,9 @@ exports.init = (ctx) => {
     const fade = o.fade && len > 3, n2 = next();
     f.push(`[${cur}]${fade ? `fade=t=in:st=0:d=0.25,fade=t=out:st=${(len - 0.45).toFixed(2)}:d=0.45,` : ""}format=yuv420p[vout]`);
     const audio = info.audio;
-    if (audio) f.push(`[0:a]${o.loud ? "loudnorm=I=-14:TP=-1.5:LRA=11," : ""}${fade ? `afade=t=in:st=0:d=0.2,afade=t=out:st=${(len - 0.45).toFixed(2)}:d=0.45,` : ""}aresample=48000[aout]`);
+    // always plain stereo 48 kHz for AAC: some videos have sound with no channel layout (or 5.1, mono) that the encoder won't take as it is
+    const toStereo = info.achans ? `pan=stereo|c0=c0|c1=c${Math.min(1, info.achans - 1)},` : "";
+    if (audio) f.push(`[0:a]${toStereo}${o.loud ? "loudnorm=I=-14:TP=-1.5:LRA=11," : ""}${fade ? `afade=t=in:st=0:d=0.2,afade=t=out:st=${(len - 0.45).toFixed(2)}:d=0.45,` : ""}aresample=48000,aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[aout]`);
     void n2;
     const args = ["-hide_banner", "-nostdin", "-y", "-ss", String(j.start), "-t", String(len), ...(mode.hw ? hw() : []), ...(mode.keep ? ["-reinit_filter", "0"] : []), "-i", j.file];
     if (inputs > 1) args.push("-i", o.logo);
